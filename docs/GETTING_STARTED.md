@@ -6,6 +6,17 @@ builds schedules, and plays the channel from whatever point matches the current
 time. You normally use the Windows app and its Dashboard. You do not need to run
 the developer commands described elsewhere in this repository.
 
+## Why use CRTV Sim?
+
+CRTV Sim reads and plays your files directly. It does not rely on Plex or any
+other media server. Your folders tell CRTV Sim which channel and daypart a show
+belongs to; it handles the schedule and guide, can fill breaks with the
+commercials and continuity clips you provide, and joins programs already in
+progress. It is built for
+personal collections with media from different sources and with different
+formats or picture quality. Optional processing can help standardize that media,
+and review screens let you make the call when an automatic correction is unsure.
+
 ## 1. Install and open CRTV Sim
 
 1. Extract the complete CRTV Sim ZIP into a folder you can write to, such as

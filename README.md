@@ -11,6 +11,17 @@ aspect analysis, corrected-media replacement with verified backups, persistent
 date-aware schedules, complete blocks, join-in-progress playback, a rendered TV
 Guide channel, and a unified Windows application dashboard with automation.
 
+## Why CRTV Sim?
+
+CRTV Sim builds always-on TV channels directly from your video files. It does
+not require Plex or another media server: put media in channel and daypart
+folders, and CRTV Sim scans it, builds schedules and a guide, and tunes into
+whatever program is already in progress. It is designed for collections gathered
+from different sources and with different formats and quality levels. Optional
+video and audio preparation, automatic aspect analysis, and review tools help
+bring that library into a consistent presentation, while the deeper controls
+stay available when you want them.
+
 New to CRTV Sim? Start with the plain-language
 [Getting Started guide](docs/GETTING_STARTED.md). The rest of this README and the
 other project documents describe the detailed technical design and operation.
