@@ -1420,3 +1420,9 @@ in [DISTRIBUTION.md](docs/DISTRIBUTION.md),
 [PRIVACY-AND-SERVICES.md](docs/PRIVACY-AND-SERVICES.md), and
 [THIRD-PARTY.md](docs/THIRD-PARTY.md). See the remaining public-release gates
 before publishing the ZIP.
+
+## License
+
+CRTV Sim's original source code and documentation are licensed under the MIT
+License. Bundled third-party tools and assets retain their own licenses and
+notices; see [docs/THIRD-PARTY.md](docs/THIRD-PARTY.md).

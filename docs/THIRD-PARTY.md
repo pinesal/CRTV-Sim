@@ -24,8 +24,10 @@ build recipes for the tool commits and linked dependencies, or replace them with
 builds whose complete source materials you can distribute. Verify codec/patent
 obligations applicable to your distribution. This candidate does not invent a
 source offer, claim license clearance, or grant a license to CRTV Sim itself.
-Choose CRTV Sim's own license before public redistribution. Code signing, hosting
-and a clean standard-account machine test are also pending public-release choices.
+CRTV Sim's original source code and documentation are licensed under the MIT
+License; that license does not replace the separate terms for bundled third-party
+tools and assets. Code signing, hosting, and a clean standard-account machine
+test are also pending public-release choices.
 
 DejaVu font source/license: https://github.com/dejavu-fonts/dejavu-fonts ; the bundled
 font was obtained from Matplotlib 3.10.7's unmodified DejaVu font resources.
