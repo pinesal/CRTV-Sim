@@ -69,6 +69,31 @@ The **shared** folder is for items that can be considered by multiple channels,
 such as commercials or episodes. Shared items are used alongside channel
 content when their daypart and channel eligibility allow it.
 
+## How commercials, bumpers, and interstitials work
+
+These are three different kinds of station material:
+
+- **Commercials** are the ad clips in a channel's `commercials` folder. CRTV Sim
+  builds short commercial pods at suitable program breaks and when there is
+  unused time to fill. It chooses clips that fit the available time. Program
+  content takes priority, so a pod can be shorter than the configured target or
+  skipped if no suitable clips fit.
+- **Bumpers** are brief transitions around programs and commercial breaks, such
+  as “we'll be right back” or “welcome back.” Put them in a `bumpers` folder.
+  CRTV Sim uses filename clues to place break-start and return bumpers at the
+  matching side of a break; general bumpers can be used in either position.
+  Bumpers linked to a particular show are reserved for that show.
+- **Interstitials** are channel-branded stills or short videos, not ads. Add
+  them under `graphics/interstitials/` or a more specific daypart or holiday
+  graphics folder. They cover small leftover gaps after scheduled programs,
+  commercials, promos, and explicit `filler` clips have been placed. A still can
+  stay on screen or a video can loop for the exact remaining time. If no usable
+  station graphic is available, CRTV Sim shows its continuity slate instead.
+
+The separate **Up Next** screen previews upcoming programming; an interstitial
+is a general station graphic used to cover a gap. Add station graphics through
+**Library & Schedules** if you prefer to upload or generate them in the Dashboard.
+
 ## 3. Let CRTV Sim scan and schedule
 
 After adding or moving files, open the Dashboard and choose **Scan & update now**.
