@@ -5,22 +5,18 @@ use **CRTV Sim**; the `retrotv` Python package and command remain compatible.
 `crtvsim` is also available after installing the updated package. Existing
 `user-data`, media paths, databases and saved provider keys do not need renaming.
 
-CRTV Sim is a cross-platform simulated linear television project. Phases 1–7.5
+CRTV Sim is a simulated linear television project for Windows. Phases 1–7.5
 provide a portable SQLite media library, folder classification, integrity and
 aspect analysis, corrected-media replacement with verified backups, persistent
 date-aware schedules, complete blocks, join-in-progress playback, a rendered TV
 Guide channel, and a unified Windows application dashboard with automation.
-
-The complete product design is in [DESIGN.md](DESIGN.md).
 
 ## Requirements
 
 - Python 3.11 or newer
 - FFmpeg and FFprobe available on `PATH`, or configured explicitly
 - mpv for production playback; FFplay is available as a Windows fallback
-- Windows for the current development profile
-- Raspberry Pi OS support is represented by a production profile and platform
-  contract; physical Pi playback arrives in a later phase
+- Windows is the supported development and distribution platform
 
 CRTV Sim itself has no third-party Python dependencies. On Windows, the bundled
 RetroWeather companion installs the small `tzdata` package so IANA forecast
@@ -32,8 +28,8 @@ timezones work inside the shared virtual environment.
   transitions in commercial compilations, previews and creates individual
   clips, then uses OpenAI GPT Transcribe to preview and apply descriptive
   filenames.
-- [CRTV Sim DVD Ripper](dvd-ripper/README.md) prepares owned DVDs for the CRTV Sim
-  movie library.
+- **CRTV Sim DVD Ripper** prepares owned movie and TV-series DVDs for the media
+  library. Its TV Series mode tracks episode names and numbering across discs.
 
 Both are standalone Windows desktop applications with their own environments;
 their optional media dependencies do not change the main CRTV Sim installation.
@@ -1104,8 +1100,8 @@ without copying, probing, converting, or analyzing the video again. A generated
 file retains the real filename and adds `.shadow`, for example
 `S02E12.mp4.shadow`. It is UTF-8 JSON containing a media-root-relative target
 path, format version, and the target's working SHA-256 hash. Relative paths keep
-the placement portable between Windows and Raspberry Pi; the hash and persisted
-target asset allow CRTV Sim to retain the relationship when real media is moved.
+the placement portable between installations; the hash and persisted target
+asset allow CRTV Sim to retain the relationship when real media is moved.
 
 Use **Create shadow** on an individual Media Library row, **Create shadows** on
 a Programming Inventory folder, or the recursive folder picker in the

@@ -21,4 +21,4 @@ clean release package: never target a live installation containing user-data.
 The internal retrotv package, database paths, environment variables, credential
 targets and production markers retain their existing names for compatibility.
 Recovery recognizes both CRTV-Sim.exe and legacy RetroTV.exe. RetroWeather
-keeps its separate name. This Windows package is not a Raspberry Pi/Linux build.
+keeps its separate name.

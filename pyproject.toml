@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "retrotv"
 version = "0.9.47"
-description = "CRTV Sim: a cross-platform simulated linear television scheduler and media library."
+description = "CRTV Sim: a simulated linear television scheduler and media library for Windows."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
