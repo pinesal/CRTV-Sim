@@ -172,9 +172,18 @@ Write-Utf8NoBom -Path (Join-Path $defaultsConfig 'base.example.toml') -Content $
 & $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') $outputRoot
 if ($LASTEXITCODE -ne 0) { throw 'Public defaults preparation failed.' }
 $licenseRoot = Join-Path $outputRoot 'licenses'
-Copy-Item -LiteralPath (Join-Path (Split-Path -Parent (Split-Path -Parent $ffmpeg)) 'LICENSE') -Destination (Join-Path $licenseRoot 'FFmpeg-LICENSE.txt') -Force
-if (Test-Path -LiteralPath (Join-Path $mpvDirectory 'LICENSE')) {
-    Copy-Item -LiteralPath (Join-Path $mpvDirectory 'LICENSE') -Destination (Join-Path $licenseRoot 'mpv-LICENSE.txt') -Force
+$ffmpegPackageRoot = Split-Path -Parent (Split-Path -Parent $ffmpeg)
+$ffmpegLicense = Join-Path $ffmpegPackageRoot 'LICENSE'
+$ffmpegBuildReadme = Join-Path $ffmpegPackageRoot 'README.txt'
+if (-not (Test-Path -LiteralPath $ffmpegLicense) -or -not (Test-Path -LiteralPath $ffmpegBuildReadme)) {
+    throw 'The selected FFmpeg package must include its upstream LICENSE and README.txt build inventory.'
+}
+Copy-Item -LiteralPath $ffmpegLicense -Destination (Join-Path $licenseRoot 'FFmpeg-LICENSE.txt') -Force
+Copy-Item -LiteralPath $ffmpegBuildReadme -Destination (Join-Path $licenseRoot 'FFmpeg-BUILD-README.txt') -Force
+foreach ($notice in @('mpv-Copyright.txt', 'mpv-LICENSE.GPL.txt', 'Vulkan-Loader-LICENSE.txt')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $licenseRoot $notice))) {
+        throw "Required bundled media-tool notice is missing: $notice"
+    }
 }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.ps1') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.47.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.cmd') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.47.cmd') -Force

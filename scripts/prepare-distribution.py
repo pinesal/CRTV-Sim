@@ -26,6 +26,11 @@ def write(path, value):
     path.write_text(value, encoding='utf-8')
 
 
+def sha256_file(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
 def scaffold(root):
     for channel in ('shared', '_channel_template'):
         base = root / channel
@@ -126,9 +131,20 @@ backend = "mpv"
     shutil.copy2(PROJECT / 'docs/DISTRIBUTION.md', output / 'README-PORTABLE.txt')
     shutil.copy2(PROJECT / 'docs/PRIVACY-AND-SERVICES.md', output / 'PRIVACY-AND-SERVICES.md')
     shutil.copy2(PROJECT / 'docs/THIRD-PARTY.md', output / 'THIRD-PARTY.md')
+    shutil.copy2(PROJECT / 'docs/BUNDLED-SOFTWARE-RELEASE-CHECKLIST.md', output / 'BUNDLED-SOFTWARE-RELEASE-CHECKLIST.md')
     notices = output / 'licenses'
     notices.mkdir(exist_ok=True)
-    for notice in (PROJECT / 'assets/public-notices').glob('*'):
+    public_notices = list((PROJECT / 'assets/public-notices').glob('*'))
+    required_notices = {
+        'mpv-Copyright.txt',
+        'mpv-LICENSE.GPL.txt',
+        'Vulkan-Loader-LICENSE.txt',
+    }
+    present_notices = {notice.name for notice in public_notices}
+    missing_notices = required_notices - present_notices
+    if missing_notices:
+        raise ValueError(f'Missing bundled media-tool notices: {", ".join(sorted(missing_notices))}')
+    for notice in public_notices:
         shutil.copy2(notice, notices / notice.name)
     inventory = {'python': sys.version, 'platform': platform.platform(), 'packages': {}, 'tools': {}}
     for distribution in importlib.metadata.distributions():
@@ -147,7 +163,10 @@ backend = "mpv"
     for relative in ('tools/ffmpeg/ffmpeg.exe', 'tools/ffmpeg/ffprobe.exe', 'tools/mpv/mpv.exe'):
         path = output / relative
         result = subprocess.run([str(path), '-version' if 'ffm' in relative or 'ffprobe' in relative else '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
-        inventory['tools'][relative] = {'sha256': hashlib.file_digest(path.open('rb'),'sha256').hexdigest(), 'version_and_build': result.stdout + result.stderr}
+        inventory['tools'][relative] = {'sha256': sha256_file(path), 'version_and_build': result.stdout + result.stderr}
+    for path in sorted((output / 'tools').rglob('*.dll')):
+        relative = path.relative_to(output).as_posix()
+        inventory['tools'][relative] = {'sha256': sha256_file(path)}
     write(output / 'BUILD-INVENTORY.json', json.dumps(inventory, indent=2))
 
 
