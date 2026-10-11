@@ -11,6 +11,10 @@ aspect analysis, corrected-media replacement with verified backups, persistent
 date-aware schedules, complete blocks, join-in-progress playback, a rendered TV
 Guide channel, and a unified Windows application dashboard with automation.
 
+New to CRTV Sim? Start with the plain-language
+[Getting Started guide](docs/GETTING_STARTED.md). The rest of this README and the
+other project documents describe the detailed technical design and operation.
+
 ## Requirements
 
 - Python 3.11 or newer
