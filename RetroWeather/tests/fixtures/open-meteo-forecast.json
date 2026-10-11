@@ -1,0 +1,64 @@
+{
+  "latitude": 34.05,
+  "longitude": -118.25,
+  "generationtime_ms": 0.31,
+  "utc_offset_seconds": -25200,
+  "timezone": "America/Los_Angeles",
+  "timezone_abbreviation": "GMT-7",
+  "elevation": 89.0,
+  "current_units": {
+    "time": "iso8601",
+    "interval": "seconds",
+    "temperature_2m": "°F",
+    "apparent_temperature": "°F",
+    "relative_humidity_2m": "%",
+    "is_day": "",
+    "precipitation": "inch",
+    "weather_code": "wmo code",
+    "pressure_msl": "hPa",
+    "wind_speed_10m": "mp/h",
+    "wind_direction_10m": "°",
+    "wind_gusts_10m": "mp/h",
+    "visibility": "m"
+  },
+  "current": {
+    "time": "2026-08-06T14:15",
+    "interval": 900,
+    "temperature_2m": 78.4,
+    "apparent_temperature": 79.1,
+    "relative_humidity_2m": 54,
+    "is_day": 1,
+    "precipitation": 0.0,
+    "weather_code": 1,
+    "pressure_msl": 1012.6,
+    "wind_speed_10m": 7.5,
+    "wind_direction_10m": 240,
+    "wind_gusts_10m": null,
+    "visibility": 16093.44
+  },
+  "hourly": {
+    "time": [
+      "2026-08-06T13:00",
+      "2026-08-06T14:00",
+      "2026-08-06T15:00",
+      "2026-08-06T20:00"
+    ],
+    "temperature_2m": [77.0, 78.0, 79.0, 70.2],
+    "apparent_temperature": [77.4, 78.6, 79.4, 69.8],
+    "weather_code": [1, 1, 2, 0],
+    "precipitation_probability": [0, 0, 5, 0],
+    "precipitation": [0.0, 0.0, 0.0, 0.0],
+    "wind_speed_10m": [7.0, 7.5, 8.1, 5.2],
+    "wind_gusts_10m": [12.0, null, 13.4, null],
+    "is_day": [1, 1, 1, 0]
+  },
+  "daily": {
+    "time": ["2026-08-06", "2026-08-07"],
+    "weather_code": [1, 2],
+    "temperature_2m_max": [81.0, 82.0],
+    "temperature_2m_min": [64.0, 65.0],
+    "precipitation_probability_max": [0, 5],
+    "sunrise": ["2026-08-06T06:09", "2026-08-07T06:10"],
+    "sunset": ["2026-08-06T19:50", "2026-08-07T19:49"]
+  }
+}

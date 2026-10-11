@@ -1,0 +1,31 @@
+{
+  "results": [
+    {
+      "id": 5368361,
+      "name": "Los Angeles",
+      "latitude": 34.05223,
+      "longitude": -118.24368,
+      "elevation": 89.0,
+      "feature_code": "PPLA2",
+      "country_code": "US",
+      "timezone": "America/Los_Angeles",
+      "population": 3898747,
+      "country": "United States",
+      "admin1": "California",
+      "admin2": "Los Angeles"
+    },
+    {
+      "id": 5367929,
+      "name": "Los Angeles City Center",
+      "latitude": 34.05369,
+      "longitude": -118.24277,
+      "elevation": 83.0,
+      "feature_code": "PPLX",
+      "country_code": "US",
+      "timezone": "America/Los_Angeles",
+      "country": "United States",
+      "admin1": "California"
+    }
+  ],
+  "generationtime_ms": 0.42
+}

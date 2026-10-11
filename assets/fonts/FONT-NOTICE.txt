@@ -1,0 +1,10 @@
+VCR OSD Mono 1.001
+
+Font name: VCR OSD Mono
+Font designer metadata: MrManet
+Bundled file: VCR_OSD_MONO_1.001.ttf
+
+This font was supplied from the RetroTV development machine for use by this
+project on the owner's Windows computer and Raspberry Pi. The font file does
+not contain a license notice. Confirm redistribution rights before publishing
+or distributing RetroTV with this file to other people.

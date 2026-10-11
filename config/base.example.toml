@@ -1,0 +1,396 @@
+[application]
+name = "CRTV Sim"
+timezone = "America/Los_Angeles"
+database_path = "./data/retrotv.sqlite3"
+log_level = "INFO"
+
+[database_backups]
+enabled = true
+directory = "backups"
+retention_count = 7
+
+[internet_media]
+cache_directory = "internet-cache"
+cache_limit_gib = 50
+minimum_free_gib = 5
+maximum_retries = 3
+request_timeout_seconds = 30
+probe_timeout_seconds = 60
+decode_timeout_seconds = 60
+
+[tools]
+ffmpeg = "ffmpeg"
+ffprobe = "ffprobe"
+
+[storage_roots]
+normalized = "./data/normalized"
+previews = "./data/previews"
+originals_backup = "./data/originals-backup"
+
+[scanner]
+video_extensions = [".mp4", ".mkv", ".m4v", ".avi", ".mov", ".webm", ".wmv", ".ts", ".mpg", ".mpeg"]
+sample_seconds = 2.0
+sample_end_margin_seconds = 3.0
+probe_timeout_seconds = 20.0
+decode_timeout_seconds = 30.0
+fingerprint_mode = "quick"
+quick_fingerprint_bytes = 1048576
+
+[duplicate_detection]
+hash_limit_per_maintenance = 25
+
+[library]
+long_commercial_minutes = 3
+channels = ["fox", "nickelodeon", "cartoon-network", "mtv", "discovery"]
+dayparts = ["morning", "afternoon", "evening", "night", "daytime", "all-day"]
+holidays = ["halloween", "christmas"]
+# Filename suggestions use built-in holiday clue lists. To replace or add a
+# holiday's phrases, use [library.holiday_filename_clues] in a profile:
+# halloween = ["halloween", "trick or treat", "pumpkin"]
+auto_register_channels = true
+auto_disable_missing_channels = true
+auto_channel_number_start = 10
+
+[web]
+host = "127.0.0.1"
+port = 8765
+
+[application_layer]
+analyze_breakpoints = true
+breakpoint_analysis_limit_per_maintenance = 25
+startup_channel = "fox"
+start_tv_on_launch = false
+maintenance_interval_seconds = 900
+guide_check_interval_seconds = 15
+schedule_horizon_days = 7
+analyze_new_media = true
+auto_readiness_when_tv_idle = true
+auto_convert_approved_media = true
+auto_analyze_pending_audio = true
+auto_normalize_approved_audio = true
+
+[maintenance_window]
+enabled = false
+start = "03:00"
+end = "05:00"
+
+[database_housekeeping]
+enabled = true
+minimum_interval_hours = 24
+schedule_retention_days = 30
+operation_retention_days = 30
+missing_asset_retention_days = 90
+
+[normalization]
+output_policy = "replace_with_backup"
+canvas_width = 640
+canvas_height = 480
+allow_upscale = false
+sample_count = 5
+analysis_sample_seconds = 1.0
+analysis_timeout_seconds = 45.0
+cropdetect_limit = 24
+ratio_tolerance = 0.06
+video_crf = 20
+video_preset = "medium"
+maximum_output_size_ratio = 1.10
+size_budget_safety = 0.92
+size_retry_attempts = 2
+accept_oversize_after_retries = true
+audio_bitrate_kbps = 128
+encode_timeout_seconds = 43200
+duration_tolerance_seconds = 1.0
+
+[audio_normalization]
+target_lufs = -18.0
+true_peak_dbtp = -1.5
+target_lra = 11.0
+loudness_tolerance_lu = 1.5
+audio_bitrate_kbps = 128
+opus_bitrate_kbps = 96
+timeout_seconds = 43200
+duration_tolerance_seconds = 1.0
+analyze_during_maintenance = true
+analysis_limit_per_maintenance = 2
+
+[scheduling]
+timezone = "America/Los_Angeles"
+schedule_version = 28
+horizon_days = 7
+clock_slot_minutes = 30
+short_slot_minutes = 15
+same_series_pairing = true
+short_program_target_minutes = 20
+short_program_slot_minutes = 30
+commercials_per_break_min = 2
+commercials_per_break_max = 3
+gap_fill_commercials_max = 3
+commercial_cooldown_seconds = 10800
+bumper_cooldown_seconds = 5400
+sequence_template = ["bumper", "commercial_break", "bumper", "episode"]
+opening_bumper_enabled = true
+midroll_enabled = true
+midroll_min_media_minutes = 15
+midroll_search_window_minutes = 4
+midroll_min_segment_minutes = 5
+midroll_max_pod_minutes = 5
+midroll_fallback = "midpoint"
+midroll_media_types = ["episode", "movie"]
+
+[[scheduling.dayparts]]
+slug = "morning"
+start = "06:00"
+end = "12:00"
+boundary_policy = "must_fit"
+
+[[scheduling.dayparts]]
+slug = "afternoon"
+start = "12:00"
+end = "17:00"
+boundary_policy = "must_fit"
+
+[[scheduling.dayparts]]
+slug = "evening"
+start = "17:00"
+end = "22:00"
+boundary_policy = "must_fit"
+
+[[scheduling.dayparts]]
+slug = "night"
+start = "22:00"
+end = "06:00"
+boundary_policy = "must_fit"
+
+[seasonal]
+
+[seasonal.holidays.halloween]
+start = "10-01"
+end = "10-31"
+mode = "boost"
+priority = 200
+maximum_per_break = 2
+cooldown_seconds = 3600
+shared_movie_channels = ["*"]
+weights = { commercial = 3.0, bumper = 2.0, promo = 2.0, episode = 1.5, movie = 1.5 }
+
+[seasonal.holidays.christmas]
+start = "12-01"
+end = "12-31"
+mode = "boost"
+priority = 200
+maximum_per_break = 2
+cooldown_seconds = 3600
+shared_movie_channels = ["*"]
+weights = { commercial = 3.0, bumper = 2.0, promo = 2.0, episode = 1.5, movie = 1.5 }
+
+# Editable starter profiles. Enable a window after adding media beneath
+# <channel>/specials/weekly/<collection>/<media-type>/.
+[seasonal.windows.snick]
+channel = "nickelodeon"
+weekdays = ["saturday"]
+start = "20:00"
+end = "22:00"
+collection = "snick"
+guide_label = "SNICK"
+priority = 300
+enabled = false
+
+[seasonal.windows.adult-swim]
+channel = "cartoon-network"
+weekdays = ["sunday", "monday", "tuesday", "wednesday", "thursday"]
+start = "23:00"
+end = "05:00"
+collection = "adult-swim"
+guide_label = "Adult Swim"
+priority = 300
+enabled = false
+
+[seasonal.windows.animation-domination]
+channel = "fox"
+weekdays = ["sunday"]
+start = "19:00"
+end = "22:00"
+collection = "animation-domination"
+guide_label = "Animation Domination"
+priority = 300
+enabled = false
+
+[seasonal.windows.tgif]
+channel = "fox"
+weekdays = ["friday"]
+start = "20:00"
+end = "22:00"
+collection = "tgif"
+guide_label = "TGIF"
+priority = 300
+enabled = false
+
+[seasonal.windows.mtv-oddities]
+channel = "mtv"
+weekdays = ["sunday"]
+start = "22:00"
+end = "00:00"
+collection = "mtv-oddities"
+guide_label = "MTV's Oddities"
+priority = 300
+enabled = false
+
+[blocks]
+selection_probability = 0.30
+maximum_per_daypart = 3
+repeat_cooldown_days = 30
+fallback_when_no_programming = true
+fallback_relaxes_repeat_restrictions = true
+boundary_policy = "may_overrun"
+long_daypart_threshold_hours = 8
+extended_daypart_threshold_hours = 12
+overlap_policy = "join_in_progress"
+minimum_join_remaining_minutes = 60
+minimum_join_remaining_fraction = 0.50
+
+[guide]
+channel_number = 2
+output = "./data/generated/guide.mp4"
+columns_minutes = [0, 30, 60]
+slot_minutes = 30
+channels_per_page = 4
+scroll_row_height = 48
+text_size_percent = 100
+scroll_pixels_per_second = 20
+abbreviate_channel_labels = true
+show_pending_action_indicator = true
+logo = "assets/branding/retrotv-guide-logo.png"
+fonts_dir = "assets/fonts"
+music_directory = "_guide/music"
+music_volume = 0.20
+music_max_minutes = 10
+
+[guide.greetings]
+morning = "Good Morning!"
+afternoon = "Good Afternoon!"
+evening = "Good Evening!"
+night = "Good Night!"
+
+[guide.holiday_greetings.halloween]
+morning = "A Spooky Good Morning!"
+afternoon = "Have a Frightfully Good Afternoon!"
+evening = "Have a Spooky Evening!"
+night = "Good Night... If You Dare!"
+
+[guide.holiday_greetings.christmas]
+morning = "Season's Greetings!"
+afternoon = "Have a Merry Afternoon!"
+evening = "Have a Cozy Evening!"
+night = "Good Night, and Happy Holidays!"
+
+[guide.channel_numbers]
+fox = 5
+nickelodeon = 33
+cartoon-network = 32
+mtv = 34
+discovery = 35
+weather = 42
+
+[synthetic_channels.weather]
+enabled = true
+root = "./RetroWeather/synthetic-channels/weather"
+display_name = "RetroWeather"
+stale_warning_minutes = 60
+manage_companion = true
+companion_home = "./RetroWeather"
+companion_host = "127.0.0.1"
+companion_port = 8775
+companion_health_poll_seconds = 5
+companion_startup_timeout_seconds = 20
+companion_restart_initial_seconds = 2
+companion_restart_max_seconds = 60
+companion_http_timeout_seconds = 2
+
+[announcements]
+output_dir = "./data/generated/announcements"
+fonts_dir = "assets/fonts"
+opportunity_duration_seconds = 30
+dwell_seconds = 60
+activity_window_minutes = 120
+minimum_lead_minutes = 4
+maximum_lead_minutes = 10
+poll_interval_seconds = 5
+listing_count = 3
+minimum_duration_seconds = 12
+ending_silence_seconds = 1.25
+tts_provider = "openai"
+script_model = "gpt-5.6-luna"
+speech_model = "gpt-4o-mini-tts"
+voice = "alloy"
+maximum_words = 55
+provider_timeout_seconds = 90
+default_tagline = "You're watching {channel}!"
+default_spoken_tagline = "You're watching {channel}!"
+
+[announcements.script]
+opening = "Up next on {channel}..."
+first = "{title}."
+second = "Followed by {title}."
+third = "Then, later today, {title}."
+additional = "And later, {title}."
+closing = "{tagline}"
+
+[announcements.channels.nickelodeon]
+ai_enabled = false
+background_color = "0xF58220"
+tagline = "The only network for kids!"
+spoken_tagline = "The only network for kids, Nickelodeon!"
+personality_prompt = "You are a station announcer for Nickelodeon in the 1990s. Speak in a period-appropriate manner for a coming-up-next station segment. Be playful and funny."
+voice_instructions = "Sound upbeat, playful, youthful, and polished like a 1990s cable television announcer."
+generic_script = "You're watching Nickelodeon, the only network for kids! Don't go anywhere - more Nick is coming up."
+
+[daypart_branding.nickelodeon.night]
+display_name = "Nick at Nite"
+ai_enabled = false
+voice = "onyx"
+personality_prompt = "You are a station announcer for Nick at Nite in the 1990s. Sound warm, witty, nostalgic, and period-appropriate for an evening block of classic television."
+voice_instructions = "Use a warm, smooth, relaxed late-night television-announcer delivery with a touch of playful nostalgia."
+generic_script = "You're watching Nick at Nite. Settle in for more classic television, all night long."
+tagline = "Hello out there from TV Land!"
+spoken_tagline = "You're watching Nick at Nite!"
+background_color = "0x20345B"
+
+[graphics]
+output_dir = "./data/generated/graphics"
+ai_image_model = "gpt-image-1"
+ai_image_lab_model = "gpt-image-2.5-flare"
+holidays = ["halloween", "christmas"]
+interstitial_duration_seconds = 10
+cooldown_minutes = 30
+standalone_enabled = true
+music_volume = 0.28
+up_next_music_volume = 0.16
+
+[generated_cleanup]
+enabled = true
+run_during_maintenance = true
+minimum_interval_hours = 24
+silent_retention_days = 7
+narrated_retention_days = 30
+graphics_retention_days = 14
+aspect_preview_retention_days = 7
+delete_normalization_backups = true
+normalization_backup_retention_days = 30
+temporary_retention_hours = 1
+obsolete_continuity_retention_days = 1
+guide_versions_to_keep = 3
+
+[player]
+backend = "auto"
+mpv = "mpv"
+ffplay = "ffplay"
+fullscreen = false
+foreground_on_start = true
+ipc_timeout_seconds = 10
+skip_short_remaining_seconds = 1.0
+osd_color = "#00ff66"
+osd_font = "VCR OSD Mono"
+osd_font_size = 55
+fonts_dir = "assets/fonts"
+osd_margin_x = 48
+osd_margin_y = 36

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retrotv"
+version = "0.9.47"
+description = "CRTV Sim: a cross-platform simulated linear television scheduler and media library."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "certifi==2026.7.22",
+    "truststore==0.10.4",
+    "breeze-blue==0.20.1",
+]
+
+[project.scripts]
+crtvsim = "retrotv.cli:main"
+retrotv = "retrotv.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "application": {
+    "host": "127.0.0.1",
+    "port": 8775
+  },
+  "channel": {
+    "slug": "weather",
+    "display_name": "RetroWeather",
+    "duration_seconds": 120,
+    "segments": [
+      {"id": "station-id", "title": "Station ID", "duration_seconds": 5},
+      {"id": "current-conditions", "title": "Current Conditions", "duration_seconds": 12.5},
+      {"id": "local-forecast", "title": "Local Forecast", "duration_seconds": 20},
+      {"id": "hourly-outlook", "title": "Hourly Outlook", "duration_seconds": 25},
+      {"id": "tonight-tomorrow", "title": "Tonight / Tomorrow", "duration_seconds": 17.5},
+      {"id": "extended-forecast", "title": "Extended Forecast", "duration_seconds": 27.5},
+      {"id": "return-to-station-id", "title": "Return to Station ID", "duration_seconds": 12.5}
+    ]
+  },
+  "units": {
+    "system": "imperial"
+  },
+  "appearance": {
+    "panel_opacity": 0.58,
+    "panel_border_opacity": 0.46,
+    "safe_margin": 28,
+    "text_scale": 1.0,
+    "palette": {
+      "header": "0x071827",
+      "panel": "0x071827",
+      "panel_alternate": "0x102c44",
+      "primary": "0xf8fbff",
+      "secondary": "0xb8d8ec",
+      "muted": "0x82a9c2",
+      "accent": "0x59c7e8",
+      "condition": "0x82edb0"
+    }
+  },
+  "location": null,
+  "refresh": {
+    "automatic": true,
+    "data_minutes": 15,
+    "render_minutes": 30,
+    "provider_timeout_seconds": 20,
+    "stale_after_minutes": 90,
+    "scheduler_poll_seconds": 5,
+    "retry_initial_seconds": 60,
+    "retry_max_seconds": 900
+  },
+  "retention": {
+    "valid_versions": 3
+  },
+  "paths": {
+    "cache": "data/cache",
+    "state": "data/state",
+    "media": "retroweather-media",
+    "output": "synthetic-channels/weather"
+  }
+}

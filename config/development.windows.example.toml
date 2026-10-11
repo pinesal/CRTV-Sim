@@ -1,0 +1,15 @@
+extends = "base.example.toml"
+profile = "windows-development"
+
+[storage_roots]
+media = "F:/Videos/media"
+state = "./data"
+normalized = "./data/normalized"
+previews = "./data/previews"
+originals_backup = "F:/Videos/retrotv-originals-backup"
+
+[platform]
+name = "windows"
+player_ipc = "windows"
+service = "foreground"
+input_adapters = ["keyboard"]

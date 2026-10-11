@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retroweather"
+version = "0.1.0"
+description = "A retro-styled local weather channel generator for RetroTV."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "tzdata>=2024.1; platform_system == 'Windows'",
+]
+
+[project.scripts]
+retroweather = "retroweather.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
