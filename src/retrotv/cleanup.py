@@ -363,7 +363,7 @@ class GeneratedAssetCleanup:
             if asset_id not in current_hashes:
                 try:
                     current_hashes[asset_id] = sha256_file(current)
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     summary.errors.append(f"{current}: {exc}")
                     current_hashes[asset_id] = None
             current_hash = current_hashes[asset_id]
@@ -470,22 +470,23 @@ class GeneratedAssetCleanup:
         try:
             if now - candidate.stat().st_mtime < maximum_age:
                 return False
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             summary.errors.append(f"{candidate}: {exc}")
             return False
         return self._remove(candidate, summary, protected)
 
-    @staticmethod
     def _remove(
-        candidate: Path, summary: CleanupSummary, protected: set[Path]
+        self, candidate: Path, summary: CleanupSummary, protected: set[Path]
     ) -> bool:
         resolved = candidate.resolve()
         if resolved in protected or not candidate.is_file():
             return False
         try:
             size = candidate.stat().st_size
+            from retrotv.asset_paths import require_writable_path
+            require_writable_path(self.connection, candidate)
             candidate.unlink()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             summary.errors.append(f"{candidate}: {exc}")
             return False
         summary.files_removed += 1

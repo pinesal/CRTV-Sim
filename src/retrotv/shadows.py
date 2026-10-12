@@ -98,7 +98,7 @@ class ShadowService:
         row = self.connection.execute(
             """
             SELECT a.* FROM assets a
-            WHERE a.source_relative_path=?
+            WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE logical_name='media' AND source_kind='managed') AND a.source_relative_path=?
               AND a.integrity_status IN ('ready','not_scanned')
             """,
             (relative,),
@@ -108,7 +108,7 @@ class ShadowService:
         previous = self.connection.execute(
             """
             SELECT a.* FROM shadow_files s JOIN assets a ON a.id=s.target_asset_id
-            WHERE s.shadow_relative_path=?
+            WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE logical_name='media' AND source_kind='managed') AND s.shadow_relative_path=?
               AND a.integrity_status IN ('ready','not_scanned')
             """,
             (shadow_relative,),
@@ -120,7 +120,7 @@ class ShadowService:
                 """
                 SELECT a.* FROM assets a
                 JOIN asset_content_hashes h ON h.asset_id=a.id
-                WHERE (h.working_sha256=? OR h.original_sha256=?)
+                WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE logical_name='media' AND source_kind='managed') AND (h.working_sha256=? OR h.original_sha256=?)
                   AND a.integrity_status IN ('ready','not_scanned')
                 ORDER BY h.working_sha256=? DESC, a.id
                 """,
@@ -281,7 +281,7 @@ class ShadowService:
                 """
                 SELECT a.*,h.working_sha256 FROM assets a
                 LEFT JOIN asset_content_hashes h ON h.asset_id=a.id
-                WHERE a.id=? AND a.integrity_status IN ('ready','not_scanned')
+                WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND a.id=? AND a.integrity_status IN ('ready','not_scanned')
                 """,
                 (asset_id,),
             ).fetchall()
@@ -294,7 +294,7 @@ class ShadowService:
                 """
                 SELECT a.*,h.working_sha256 FROM assets a
                 LEFT JOIN asset_content_hashes h ON h.asset_id=a.id
-                WHERE a.source_relative_path LIKE ? ESCAPE '\\'
+                WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE logical_name='media' AND source_kind='managed') AND a.source_relative_path LIKE ? ESCAPE '\\'
                   AND a.integrity_status IN ('ready','not_scanned')
                 ORDER BY a.source_relative_path
                 """,
@@ -305,7 +305,7 @@ class ShadowService:
                 SELECT a.*,h.working_sha256 FROM shadow_files s
                 JOIN assets a ON a.id=s.target_asset_id
                 LEFT JOIN asset_content_hashes h ON h.asset_id=a.id
-                WHERE s.shadow_relative_path LIKE ? ESCAPE '\\'
+                WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE logical_name='media' AND source_kind='managed') AND s.shadow_relative_path LIKE ? ESCAPE '\\'
                   AND s.status='ready'
                   AND a.integrity_status IN ('ready','not_scanned')
                 ORDER BY s.shadow_relative_path
@@ -558,7 +558,7 @@ class ShadowService:
         rows = self.connection.execute(
             """
             SELECT source_relative_path FROM assets
-            WHERE integrity_status IN ('ready','not_scanned')
+            WHERE source_root_id IN (SELECT id FROM storage_roots WHERE logical_name='media' AND source_kind='managed') AND integrity_status IN ('ready','not_scanned')
             ORDER BY source_relative_path
             """
         ).fetchall()

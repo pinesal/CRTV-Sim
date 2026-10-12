@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from retrotv.asset_paths import resolve_asset_path, is_external
 from retrotv.db import utc_now
 from retrotv.process_control import ProcessCancelled, run_cancellable
 
@@ -59,6 +60,8 @@ class BreakpointAnalyzer:
             a.media_type IN ('episode','movie')
             AND a.enabled_for_scheduling=1 AND a.review_status='ready'
             AND a.metadata_status='ready'
+            AND (a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') OR
+                 a.source_root_id IN (SELECT s.root_id FROM external_sources s JOIN storage_roots r ON r.id=s.root_id WHERE r.enabled=1 AND s.availability='available'))
             AND a.integrity_status IN ('ready', 'not_scanned')
             AND m.duration_seconds > ?
             AND (b.asset_id IS NULL OR b.status IN ('pending', 'error') OR
@@ -344,11 +347,11 @@ class BreakpointAnalyzer:
         )
 
     def _playback_path(self, row) -> Path:
-        if row["proxy_status"] == "ready" and row["proxy_relative_path"]:
+        if not is_external(self.connection, row["id"]) and row["proxy_status"] == "ready" and row["proxy_relative_path"]:
             proxy = self.config.storage_root("normalized") / Path(row["proxy_relative_path"])
             if proxy.is_file():
                 return proxy
-        source = self.config.storage_root("media") / Path(row["source_relative_path"])
+        source = resolve_asset_path(self.connection, self.config, row["id"])
         if not source.is_file():
             raise FileNotFoundError(source)
         return source
@@ -375,7 +378,7 @@ class BreakpointAnalyzer:
 
     def _chapter_starts(self, row, playback_path: Path) -> list[int]:
         # Probe the working source first: a proxy may have discarded chapters.
-        source = self.config.storage_root("media") / Path(row["source_relative_path"])
+        source = resolve_asset_path(self.connection, self.config, row["id"])
         for path in (source, playback_path):
             if not path.is_file():
                 continue

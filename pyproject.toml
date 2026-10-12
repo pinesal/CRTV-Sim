@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "retrotv"
-version = "0.9.47"
+version = "0.9.48"
 description = "CRTV Sim: a simulated linear television scheduler and media library for Windows."
 readme = "README.md"
 license = "MIT"

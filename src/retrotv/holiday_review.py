@@ -247,6 +247,8 @@ class HolidayReviewService:
         self.connection.commit()
 
     def move(self, asset_id: int, holiday: str, folder: str, *, active_path: str | None = None) -> dict:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         review = self.connection.execute("""
             SELECT a.* FROM holiday_filename_reviews r JOIN assets a ON a.id=r.asset_id
             WHERE r.asset_id=? AND r.holiday_slug=? AND r.status='pending'

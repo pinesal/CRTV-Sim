@@ -242,8 +242,9 @@ class LibraryScanner:
 
         disabled = 0
         if bool(library.get("auto_disable_missing_channels", True)):
+            external_channels = {row[0] for row in self.connection.execute("SELECT channel_slug FROM external_assignments e JOIN storage_roots r ON r.id=e.root_id WHERE e.enabled=1 AND r.enabled=1")}
             missing = [
-                row for slug, row in existing.items() if slug not in discovered
+                row for slug, row in existing.items() if slug not in discovered and slug not in external_channels
             ]
             for row in missing:
                 if bool(row["enabled"]):
@@ -296,6 +297,11 @@ class LibraryScanner:
             if ".retrotv-audio.partial" in path.name.casefold():
                 continue
             if path.is_file() and path.suffix.lower() in self.extensions:
+                from retrotv.asset_paths import require_writable_path
+                try:
+                    require_writable_path(self.connection, path)
+                except ValueError:
+                    continue
                 yield path
 
     def _backfill_normalization_profiles(self) -> int:
@@ -305,7 +311,7 @@ class LibraryScanner:
             SELECT a.id
             FROM assets a
             LEFT JOIN normalization_profiles n ON n.asset_id = a.id
-            WHERE n.asset_id IS NULL
+            WHERE n.asset_id IS NULL AND a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed')
             """
         )
         self.connection.commit()
@@ -328,7 +334,7 @@ class LibraryScanner:
               ON p.asset_id=n.asset_id AND p.status='active'
             LEFT JOIN audio_normalization_promotions ap
               ON ap.asset_id=n.asset_id AND ap.status='active'
-            WHERE n.review_requested=0 AND (h.working_sha256=p.corrected_sha256
+            WHERE n.asset_id IN (SELECT a.id FROM assets a JOIN storage_roots r ON r.id=a.source_root_id WHERE r.source_kind='managed') AND n.review_requested=0 AND (h.working_sha256=p.corrected_sha256
                OR (
                     ap.original_sha256=p.corrected_sha256
                 AND h.working_sha256=ap.corrected_sha256
@@ -365,7 +371,7 @@ class LibraryScanner:
             LEFT JOIN asset_content_hashes h ON h.asset_id=n.asset_id
             LEFT JOIN normalization_promotions p
               ON p.asset_id=n.asset_id AND p.status='active'
-            WHERE n.crop_width IS NOT NULL AND n.crop_height IS NOT NULL
+            WHERE n.asset_id IN (SELECT a.id FROM assets a JOIN storage_roots r ON r.id=a.source_root_id WHERE r.source_kind='managed') AND n.crop_width IS NOT NULL AND n.crop_height IS NOT NULL
               AND (
                    n.crop_x < 0 OR n.crop_y < 0
                 OR n.crop_width <= 0 OR n.crop_height <= 0

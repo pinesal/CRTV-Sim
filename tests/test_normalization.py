@@ -704,6 +704,7 @@ class NormalizationTests(unittest.TestCase):
 
     def test_oversized_proxy_retries_with_constrained_average_bitrate(self):
         connection = Mock()
+        connection.execute.return_value.fetchall.return_value = []
         service = NormalizationService(connection, self.config)
         row = {
             "id": 44,
@@ -748,6 +749,7 @@ class NormalizationTests(unittest.TestCase):
 
     def test_valid_correction_is_kept_when_size_retries_are_exhausted(self):
         connection = Mock()
+        connection.execute.return_value.fetchall.return_value = []
         service = NormalizationService(connection, self.config)
         service.size_retry_attempts = 1
         row = {

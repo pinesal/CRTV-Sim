@@ -9,7 +9,7 @@ import time
 from urllib.request import Request, urlopen
 
 PROJECT = Path(__file__).resolve().parents[1]
-BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.47'
+BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.48'
 ROOT = PROJECT / '.test-tmp/Frozen distributión with spaces final'
 
 
@@ -71,7 +71,7 @@ def main():
         assert fields['normalization.enabled'] is False
         assert fields['audio_normalization.enabled'] is False
         assert fields['normalization.canvas_width']==1920
-        print('Frozen setup committed before scanning; Dashboard/settings available; version 0.9.47')
+        print('Frozen setup committed before scanning; Dashboard/settings available; version 0.9.48')
         stop(process)
         overlay=ROOT/'user-data/config/portable.windows.settings.json'
         payload=json.loads(overlay.read_text())

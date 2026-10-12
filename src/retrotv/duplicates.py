@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from retrotv.asset_paths import resolve_asset_path, is_external
 from retrotv.config import AppConfig
 from retrotv.db import ensure_storage_root, utc_now
 from retrotv.probe import probe_media
@@ -70,7 +71,7 @@ class DuplicateService:
         if row is None:
             raise ValueError(f"Asset {asset_id} does not exist")
         source = path or (
-            self.config.storage_root("media") / Path(row["source_relative_path"])
+            resolve_asset_path(self.connection, self.config, asset_id)
         )
         if not source.is_file():
             raise FileNotFoundError(f"Media file is missing: {source}")
@@ -166,7 +167,8 @@ class DuplicateService:
             SELECT a.id, a.source_relative_path
             FROM assets a
             LEFT JOIN asset_content_hashes h ON h.asset_id=a.id
-            WHERE a.integrity_status IN ('ready','not_scanned')
+            WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed')
+              AND a.integrity_status IN ('ready','not_scanned')
               AND a.metadata_status='ready'
               AND (
                 h.asset_id IS NULL OR h.working_file_size <> a.file_size
@@ -188,6 +190,8 @@ class DuplicateService:
         return HashBatchResult(len(rows), hashed, reused, errors)
 
     def store_normalization_recipe(self, asset_id: int) -> bool:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         row = self.connection.execute(
             """
             SELECT h.original_sha256, n.*
@@ -221,6 +225,8 @@ class DuplicateService:
         return True
 
     def apply_normalization_recipe(self, asset_id: int) -> bool:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         row = self.connection.execute(
             """
             SELECT n.analysis_status, n.review_requested, r.profile_json, m.width, m.height
@@ -265,6 +271,8 @@ class DuplicateService:
         return True
 
     def prepare_reusable_proxy(self, asset_id: int) -> int | None:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         """Stage a verified corrected copy from an exact duplicate donor."""
         target = self.connection.execute(
             """

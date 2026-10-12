@@ -34,6 +34,42 @@ make that kind of change. Smaller videos are not enlarged by video normalization
 You can set up Weather and AI services later; neither is required for regular TV
 channels.
 
+## Use an existing series folder instead
+
+You do not have to rearrange an established TV collection. Open **Library &
+Schedules**, expand **External Media Sources**, and:
+
+1. Enter the series folder's full path, such as `E:\TV Series\Doug`, or a
+   network share path accessible to the computer running CRTV Sim.
+2. Enter the series name and choose a scheduled channel and daypart. You can
+   instead enter a new channel name and optional channel number.
+3. Choose **Add & Scan**. The maintenance pipeline scans videos in the folder
+   and its season subfolders, then updates affected unlocked schedules. Refresh
+   sources to see availability, scan progress and errors.
+4. Use **Edit title & assignments** to add other channels/dayparts. Use **Rescan**
+   after adding or moving episodes. Ordinary maintenance also rescans enabled
+   sources.
+
+`daytime` covers morning, afternoon and evening; `all-day` covers all configured
+dayparts. Recurring channels retain the same scope and scarcity rules as managed
+media. Episode names containing season/episode numbers are ordered naturally;
+other filenames are supported, but cannot provide missing episode numbers.
+
+External media is **always read-only**. Video/audio normalization and commercial
+trimming do not apply. Read-only act-break analysis may still identify places for
+commercials. Put commercials, bumpers, graphics and other managed media in the
+normal Media folder; they can be used alongside external episodes.
+
+**Disconnect** removes a source from new scheduling without deleting its files
+or catalog history. **Reconnect** and **Rescan** restore it. An offline network
+share preserves the catalog; unavailable scheduled files use continuity until
+normal programming can resume. Locked schedules are not rewritten.
+
+External sources currently support **scheduled channels only**. At Your Pace
+integration is planned separately; its existing Internet Media behavior is
+unchanged. The Windows account running CRTV Sim must be able to access the path,
+even if you open the Dashboard remotely. No Plex server or connector is required.
+
 ## 2. Put media in folders
 
 The **Media** folder is your library. Copy **_channel_template**, rename the

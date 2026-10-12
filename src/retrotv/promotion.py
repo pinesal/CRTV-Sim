@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from retrotv.config import AppConfig
+from retrotv.asset_paths import checked_replace, checked_unlink
 from retrotv.db import ensure_storage_root, transaction, utc_now
 from retrotv.normalization import NormalizationService
 from retrotv.probe import fingerprint_file, probe_media
@@ -36,6 +37,8 @@ class PromotionService:
         self.normalization = NormalizationService(connection, config)
 
     def _asset(self, asset_id: int):
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         row = self.connection.execute(
             """
             SELECT a.*, n.proxy_status, n.proxy_relative_path
@@ -107,15 +110,15 @@ class PromotionService:
         else:
             backup_partial = backup.with_name(backup.name + ".partial")
             if backup_partial.exists():
-                backup_partial.unlink()
+                checked_unlink(self.connection, backup_partial)
             shutil.copy2(source, backup_partial)
             if (
                 backup_partial.stat().st_size != source.stat().st_size
                 or sha256_file(backup_partial) != original_hash
             ):
-                backup_partial.unlink(missing_ok=True)
+                checked_unlink(self.connection, backup_partial, missing_ok=True)
                 raise RuntimeError("Original backup verification failed")
-            os.replace(backup_partial, backup)
+            checked_replace(self.connection, backup_partial, backup)
 
         corrected_hash = sha256_file(proxy)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -123,10 +126,10 @@ class PromotionService:
             f".{target.stem}.retrotv-{asset_id}.partial{target.suffix}"
         )
         if install_staging.exists():
-            install_staging.unlink()
+            checked_unlink(self.connection, install_staging)
         shutil.copy2(proxy, install_staging)
         if sha256_file(install_staging) != corrected_hash:
-            install_staging.unlink(missing_ok=True)
+            checked_unlink(self.connection, install_staging, missing_ok=True)
             raise RuntimeError("Corrected working-copy verification failed")
 
         probe = probe_media(
@@ -135,15 +138,15 @@ class PromotionService:
             timeout_seconds=30.0,
         )
         if not probe.ok:
-            install_staging.unlink(missing_ok=True)
+            checked_unlink(self.connection, install_staging, missing_ok=True)
             raise RuntimeError(f"Corrected working-copy probe failed: {probe.error_detail}")
 
         installed = False
         try:
-            os.replace(install_staging, target)
+            checked_replace(self.connection, install_staging, target)
             installed = True
             if target != source:
-                source.unlink()
+                checked_unlink(self.connection, source)
             stat = target.stat()
             fingerprint, algorithm = fingerprint_file(target, mode="quick")
             metadata = probe.metadata
@@ -282,9 +285,9 @@ class PromotionService:
                     f".{source.name}.retrotv-restore.partial"
                 )
                 shutil.copy2(backup, restore_staging)
-                os.replace(restore_staging, source)
+                checked_replace(self.connection, restore_staging, source)
                 if target != source:
-                    target.unlink(missing_ok=True)
+                    checked_unlink(self.connection, target, missing_ok=True)
             raise
-        proxy.unlink(missing_ok=True)
+        checked_unlink(self.connection, proxy, missing_ok=True)
         return PromotionResult(asset_id, target, backup, promotion_id)

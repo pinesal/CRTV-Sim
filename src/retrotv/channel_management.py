@@ -198,7 +198,7 @@ class ChannelDeletionService:
         asset_ids = [
             int(row[0])
             for row in self.connection.execute(
-                "SELECT id FROM assets WHERE channel_slug=?", (channel_slug,)
+                "SELECT id FROM assets WHERE channel_slug=? AND source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed')", (channel_slug,)
             )
         ]
         with transaction(self.connection):

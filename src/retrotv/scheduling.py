@@ -31,7 +31,8 @@ WITH placements AS (
             e.weight,NULL AS shadow_id,a.source_relative_path AS placement_relative_path,
             a.daypart_slug AS placement_scope
     FROM assets a JOIN asset_eligibility e ON e.asset_id=a.id AND e.enabled=1
-    WHERE a.review_status='ready' AND a.enabled_for_scheduling=1
+    WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed')
+      AND a.review_status='ready' AND a.enabled_for_scheduling=1
       AND a.integrity_status IN ('ready','not_scanned')
     UNION ALL
     SELECT a.id AS asset_id,a.display_title,a.original_filename,
@@ -45,7 +46,21 @@ WITH placements AS (
     JOIN assets a ON a.id=s.target_asset_id
     JOIN shadow_eligibility e ON e.shadow_id=s.id AND e.enabled=1
     WHERE s.status='ready' AND a.review_status='ready'
+      AND a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed')
       AND a.enabled_for_scheduling=1
+      AND a.integrity_status IN ('ready','not_scanned')
+    UNION ALL
+    SELECT a.id,a.display_title,a.original_filename,a.series_title,a.media_type,
+           a.source_relative_path,NULL,NULL,NULL,NULL,x.channel_slug,
+           e.channel_slug,e.daypart_slug,e.weight,NULL,
+           x.channel_slug || '/' || x.scope || '/episodes/' || a.series_title || '/' || a.source_relative_path,
+           x.scope
+    FROM assets a JOIN storage_roots r ON r.id=a.source_root_id
+    JOIN external_sources es ON es.root_id=r.id
+    JOIN external_assignments x ON x.root_id=r.id AND x.enabled=1
+    JOIN asset_eligibility e ON e.asset_id=a.id AND e.eligibility_source='external:' || x.id AND e.enabled=1
+    WHERE r.source_kind='external' AND r.enabled=1 AND es.availability='available'
+      AND a.review_status='ready' AND a.enabled_for_scheduling=1
       AND a.integrity_status IN ('ready','not_scanned')
 )
 """
@@ -737,6 +752,17 @@ class ScheduleBuilder:
             "shadows": [tuple(row) for row in shadow_rows],
             "weekly_promo_settings": [tuple(row) for row in promo_settings_rows],
         }
+        external_rows = self.connection.execute(
+            'SELECT r.id,r.enabled,r.absolute_path,s.series_title,s.availability,e.id,e.scope,e.enabled FROM storage_roots r JOIN external_sources s ON s.root_id=r.id JOIN external_assignments e ON e.root_id=r.id WHERE e.channel_slug=? ORDER BY r.id,e.id',
+            (channel_slug,),
+        ).fetchall()
+        if external_rows:
+            payload['external_revision'] = 1
+            payload['external_sources'] = [tuple(row) for row in external_rows]
+            payload['external_assets'] = [tuple(row) for row in self.connection.execute(
+                'SELECT a.id,a.source_relative_path,a.display_title FROM assets a WHERE a.source_root_id IN (SELECT root_id FROM external_assignments WHERE channel_slug=?) ORDER BY a.id',
+                (channel_slug,),
+            )]
         preference = self.connection.execute(
             """
             SELECT recurring_enabled, unique_weekends, presentation_format

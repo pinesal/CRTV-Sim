@@ -1,4 +1,4 @@
-# CRTV Sim 0.9.47 for Windows
+# CRTV Sim 0.9.48 for Windows
 
 Extract the entire ZIP into a writable folder, such as Documents\CRTV Sim.
 Keep the application directory and bundled **Media** directory together. Open

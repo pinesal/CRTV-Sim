@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import base64
 import binascii
 import os
@@ -18,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from retrotv.asset_paths import resolve_asset_path, is_external
+from retrotv.external_media import ExternalMediaService
 from retrotv.config import AppConfig
 from retrotv import __version__
 from retrotv.commercial_review import CommercialReviewService
@@ -212,12 +215,12 @@ DASHBOARD_HTML = """<!doctype html>
         <dl>
           <dt>Demand poller</dt><dd id="announce-poller">--</dd>
           <dt>Last demand check</dt><dd id="announce-last-poll">--</dd>
-          <dt>Tuned since</dt><dd id="announce-tuned">â€”</dd>
-          <dt>Last human input</dt><dd id="announce-activity">â€”</dd>
-          <dt>Next opportunity</dt><dd id="announce-next">â€”</dd>
-          <dt>Eligibility</dt><dd id="announce-reason">â€”</dd>
-          <dt>Generation</dt><dd id="announce-state">â€”</dd>
-          <dt>Error</dt><dd id="announce-error">â€”</dd>
+          <dt>Tuned since</dt><dd id="announce-tuned">—</dd>
+          <dt>Last human input</dt><dd id="announce-activity">—</dd>
+          <dt>Next opportunity</dt><dd id="announce-next">—</dd>
+          <dt>Eligibility</dt><dd id="announce-reason">—</dd>
+          <dt>Generation</dt><dd id="announce-state">—</dd>
+          <dt>Error</dt><dd id="announce-error">—</dd>
         </dl>
       </div>
       <div class="panel">
@@ -320,7 +323,7 @@ DASHBOARD_HTML = """<!doctype html>
         $("now").textContent = data.now_playing?.title || "—";
         playingAssetId = data.now_playing?.asset_id || null;
         const review = data.normalization_review || {};
-        $("re-review-normalization").disabled = !playingAssetId || review.state === "running";
+        $("re-review-normalization").disabled = !playingAssetId || data.now_playing?.external || review.state === "running";
         $("re-review-status").textContent = review.error || review.message ||
           (review.state === "running" ? "Stopping playback and preparing a fresh review…" : "");
         const missing = data.now_playing?.missing_media;
@@ -426,13 +429,13 @@ DASHBOARD_HTML = """<!doctype html>
         const announcements = data.announcements;
         $("announce-poller").textContent = announcements.automation_thread_alive ? "Running" : "Stopped";
         $("announce-last-poll").textContent = announcements.last_poll_at || "--";
-        $("announce-tuned").textContent = announcements.tuned_since || "â€”";
-        $("announce-activity").textContent = announcements.last_qualifying_user_activity || "â€”";
+        $("announce-tuned").textContent = announcements.tuned_since || "—";
+        $("announce-activity").textContent = announcements.last_qualifying_user_activity || "—";
         $("announce-next").textContent = announcements.next_opportunity ?
-          `${announcements.next_opportunity.starts_at} (${announcements.next_opportunity.seconds_away}s)` : "â€”";
-        $("announce-reason").textContent = announcements.eligibility_reason || "â€”";
+          `${announcements.next_opportunity.starts_at} (${announcements.next_opportunity.seconds_away}s)` : "—";
+        $("announce-reason").textContent = announcements.eligibility_reason || "—";
         $("announce-state").textContent = announcements.generation_state || "idle";
-        $("announce-error").textContent = announcements.error || "â€”";
+        $("announce-error").textContent = announcements.error || "—";
         const batch = data.normalization_batch;
         const pending = data.pending_actions || {};
         $("batch-pending").textContent = `${pending.conversion_ready || 0}` +
@@ -932,6 +935,26 @@ INDEX_HTML = """<!doctype html>
       <button id="expand-sections">Expand all</button>
       <button id="collapse-sections">Collapse all</button>
     </div>
+    <details class="collapsible" data-section="external-media" id="external-media-panel">
+      <summary><h2>External Media Sources</h2></summary>
+      <div class="section-body">
+        <p>Use an existing series folder without copying or changing its files. External media is always read-only. Scheduled channels only; At Your Pace support is planned for Phase 1B.</p>
+        <div class="toolbar">
+          <label>Series folder on this computer<input id="external-path" placeholder="E:/TV Series/Doug or a network share"></label>
+          <label>Series title<input id="external-title" placeholder="Doug"></label>
+          <label>Scheduled channel<select id="external-channel"></select></label>
+          <label>Daypart scope<select id="external-scope"></select></label>
+        </div>
+        <div class="toolbar">
+          <label>New channel name (optional)<input id="external-new-channel" placeholder="Leave blank to use selected channel"></label>
+          <label>New channel number (optional)<input id="external-number" type="number" min="1"></label>
+          <button id="external-add">Add &amp; Scan</button><button id="external-refresh">Refresh sources</button>
+        </div>
+        <p class="muted">Folder paths are read by the Windows account running CRTV Sim, including when you open this Dashboard from another computer. Choose the series folder, not an entire multi-series library.</p>
+        <div id="external-message" role="status"></div>
+        <div id="external-sources"></div>
+      </div>
+    </details>
     <details class="collapsible" data-section="media-library" open>
       <summary><h2>Media Library</h2></summary>
       <div class="section-body">
@@ -1424,6 +1447,73 @@ INDEX_HTML = """<!doctype html>
       );
     }
 
+    let externalData = null;
+    async function externalPost(path, payload) {
+      return api(path, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    }
+    function externalAssignmentEditor(container, assignments) {
+      container.replaceChildren();
+      function addRow(assignment={}) {
+        const row=document.createElement("div"); row.className="toolbar external-assignment";
+        const channel=document.createElement("select"); channel.setAttribute("aria-label","Scheduled channel");
+        channel.replaceChildren(...externalData.channels.map(c=>new Option(`${c.channel_number || ""} · ${c.display_name}`,c.slug)));
+        if(assignment.channel_slug) channel.value=assignment.channel_slug;
+        const scope=document.createElement("select"); scope.setAttribute("aria-label","Daypart scope");
+        scope.replaceChildren(...externalData.dayparts.map(d=>new Option(d,d)));
+        scope.value=assignment.scope || "all-day";
+        const remove=document.createElement("button"); remove.textContent="Remove assignment"; remove.onclick=()=>row.remove();
+        row.append(channel,scope,remove); container.append(row);
+      }
+      assignments.forEach(addRow);
+      const add=document.createElement("button"); add.textContent="Add assignment";
+      add.onclick=()=>addRow(); container.append(add);
+    }
+    async function loadExternalSources() {
+      try {
+        externalData=await api("/api/external-media");
+        for(const [id,options] of [["external-channel",externalData.channels.map(c=>new Option(`${c.channel_number || ""} · ${c.display_name}`,c.slug))],["external-scope",externalData.dayparts.map(d=>new Option(d,d))]]) {
+          const select=$(id), previous=select.value; select.replaceChildren(...options);
+          if([...select.options].some(o=>o.value===previous)) select.value=previous;
+          else if(id==="external-scope") select.value="all-day";
+        }
+        const host=$("external-sources"); host.replaceChildren();
+        for(const source of externalData.sources) {
+          const card=document.createElement("section"); card.className="panel";
+          const title=document.createElement("h3"); title.textContent=`${source.series_title} · External / read-only`;
+          const path=document.createElement("p"); path.textContent=source.absolute_path; path.className="path";
+          const info=document.createElement("p"); info.textContent=`${source.enabled ? "Enabled" : "Disconnected"} · ${source.availability} · ${source.episode_count} episodes · scan ${source.scan_status} (${source.processed_count} processed) · last scan ${source.last_scan_at || "not yet"}`;
+          const placements=document.createElement("p"); placements.textContent=source.assignments.map(a=>`${a.channel_slug} / ${a.scope}`).join("; ") || "No assignments";
+          card.append(title,path,placements,info);
+          if(source.scan_error){const error=document.createElement("p");error.textContent=source.scan_error;error.className="bad";card.append(error);}
+          const actions=document.createElement("div"); actions.className="toolbar";
+          function button(label,action){const b=document.createElement("button");b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await action();await loadExternalSources();$("external-message").textContent="Saved. Scanning and affected schedule updates use the maintenance pipeline.";}catch(e){$("external-message").textContent=e.message;}finally{b.disabled=false;}};actions.append(b);return b;}
+          const rescan=button("Rescan",()=>externalPost(`/api/external-media/${source.id}/rescan`,{})); rescan.disabled=!source.enabled;
+          const editor=document.createElement("div"); editor.hidden=true;
+          const edit=document.createElement("button"); edit.textContent="Edit title & assignments";
+          edit.onclick=()=>{editor.hidden=!editor.hidden;card.classList.toggle("external-editing",!editor.hidden);};actions.append(edit);
+          const name=document.createElement("input"); name.value=source.series_title;name.setAttribute("aria-label","Series title");
+          const rows=document.createElement("div");externalAssignmentEditor(rows,source.assignments);
+          const save=document.createElement("button");save.textContent="Save assignments";
+          save.onclick=async()=>{try{const assignments=[...rows.querySelectorAll(".external-assignment")].map(r=>({channel:r.querySelectorAll("select")[0].value,scope:r.querySelectorAll("select")[1].value}));await externalPost(`/api/external-media/${source.id}`,{series_title:name.value,assignments});await loadExternalSources();}catch(e){$("external-message").textContent=e.message;}};
+          editor.append(name,rows,save);card.append(actions,editor);
+          button(source.enabled ? "Disconnect" : "Reconnect",async()=>{
+            if(source.enabled&&!confirm("Disconnect this source? Unlocked future schedules will change; locked schedules may show continuity for these files. Its files and catalog history will be retained."))return;
+            await externalPost(`/api/external-media/${source.id}`,{enabled:!source.enabled});
+          });
+          host.append(card);
+        }
+        if(!externalData.sources.length) host.textContent="No external series registered.";
+      }catch(e){$("external-message").textContent=e.message;}
+    }
+    $("external-add").onclick=async()=>{
+      const button=$("external-add");button.disabled=true;
+      try{await externalPost("/api/external-media",{path:$("external-path").value,series_title:$("external-title").value,new_channel:$("external-new-channel").value,channel_number:$("external-number").value,scope:$("external-scope").value,assignments:[{channel:$("external-channel").value,scope:$("external-scope").value}]});$("external-message").textContent="Source registered. Scan queued through maintenance; refresh sources to see progress.";await loadExternalSources();}
+      catch(e){$("external-message").textContent=e.message;}finally{button.disabled=false;}
+    };
+    $("external-refresh").onclick=loadExternalSources;
+    loadExternalSources();
+    setInterval(()=>{if(externalData?.sources.some(s=>s.enabled&&["running","pending"].includes(s.scan_status))&&!document.querySelector(".external-editing")&&!$("external-media-panel").contains(document.activeElement))loadExternalSources();},5000);
+
     let inventoryData = null;
     async function loadBumperReview() {
       const data = await api("/api/bumper-cues/review");
@@ -1527,16 +1617,16 @@ INDEX_HTML = """<!doctype html>
           try {
             await api("/api/inventory/open-folder", {
               method: "POST", headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({path: item.folder_relative_path})
+              body: JSON.stringify(item.row_kind === "external" ? {asset_id:item.preview_asset_id} : {path: item.folder_relative_path})
             });
             notice(`Opened the folder for ${item.title}.`);
           } catch (error) { notice(error.message, "error"); }
         });
         titleCell.append(titleLink);
-        if (item.row_kind === "shadow") {
+        if (item.row_kind === "shadow" || item.row_kind === "external") {
           const badge = document.createElement("span");
           badge.className = "shadow-badge";
-          badge.textContent = "Shadow";
+          badge.textContent = item.row_kind === "external" ? "External · read-only" : "Shadow";
           titleCell.append(badge);
         }
         addCell(row, inventoryTypeLabel(item.media_type));
@@ -1571,7 +1661,8 @@ INDEX_HTML = """<!doctype html>
             label: `${item.title} folder (${item.item_count} indexed items)`
           });
         }
-        actions.append(shadowAction);
+        if (item.row_kind !== "external") actions.append(shadowAction);
+        else actions.textContent = "Manage assignments in External Media Sources";
         body.append(row);
       }
     }
@@ -1969,7 +2060,7 @@ INDEX_HTML = """<!doctype html>
         }
         addCell(row, item.id);
         addCell(row, item.display_title || item.original_filename);
-        addCell(row, item.channel_slug || "shared");
+        addCell(row, item.external_placements || item.channel_slug || "shared");
         addCell(row, item.collection_type === "holiday"
           ? item.holiday_weekly_slug ? `weekly: ${item.holiday_weekly_slug}`
             : item.daypart_slug ? `holiday: ${item.daypart_slug}` : "holiday: all-day (legacy)"
@@ -1988,6 +2079,17 @@ INDEX_HTML = """<!doctype html>
         audioState.textContent = `audio: ${item.audio_analysis_status || "not analyzed"}` +
           (item.measured_i == null ? "" : ` / ${Number(item.measured_i).toFixed(1)} LUFS`) +
           ` / ${item.audio_correction_status || "not created"}`;
+        if (item.source_kind === "external") {
+          state.textContent = "External · read-only · normalization unavailable";
+          normalization.append(state);
+          addCell(row, "Preview using Play");
+          addCell(row, `${item.absolute_path} / ${item.source_relative_path}`, "path");
+          const safeActions = addCell(row, "", "actions");
+          const link = document.createElement("a");
+          link.href = `/api/assets/${item.id}/play`; link.target = "_blank";
+          link.textContent = "Play / preview"; safeActions.append(link);
+          body.appendChild(row); continue;
+        }
         const select = document.createElement("select");
         select.className = "mode";
         const modeLabels = {
@@ -2470,7 +2572,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function formatBreakpoint(milliseconds) {
-      if (milliseconds == null) return "â€”";
+      if (milliseconds == null) return "—";
       const total = Number(milliseconds) / 1000;
       const hours = Math.floor(total / 3600);
       const minutes = Math.floor((total % 3600) / 60);
@@ -2504,7 +2606,7 @@ INDEX_HTML = """<!doctype html>
           ? String(item.selected_offsets_ms).split(",").map(Number).sort((a, b) => a - b)
           : item.selected_offset_ms == null ? [] : [Number(item.selected_offset_ms)];
         addCell(row, selectedOffsets.length
-          ? selectedOffsets.map(formatBreakpoint).join(", ") : "â€”");
+          ? selectedOffsets.map(formatBreakpoint).join(", ") : "—");
         const evidence = (item.selected_evidence || []).map(candidate => {
           const signals = candidate.signals || {};
           const transition = signals.black_duration ? `black ${Number(signals.black_duration).toFixed(2)}s` :
@@ -2515,7 +2617,7 @@ INDEX_HTML = """<!doctype html>
           return `${formatBreakpoint(candidate.offset_ms)}: ${transition}${silence}${chapter}`;
         });
         addCell(row, evidence.join("; ") || item.selected_method || "—");
-        addCell(row, item.confidence == null ? "â€”" : Number(item.confidence).toFixed(2));
+        addCell(row, item.confidence == null ? "—" : Number(item.confidence).toFixed(2));
         const actions = addCell(row, "", "actions");
         const analyze = document.createElement("button"); analyze.textContent = "Analyze";
         analyze.onclick = () => breakpointAction(item.id, {action:"analyze"});
@@ -4037,6 +4139,8 @@ def forget_missing_asset_record(
     asset_id: int,
 ) -> int:
     """Remove one missing, ignored library record without deleting media."""
+    from retrotv.asset_paths import require_managed_asset
+    require_managed_asset(connection, config, asset_id)
     row = connection.execute(
         """
         SELECT id, source_relative_path, integrity_status, review_status
@@ -4081,7 +4185,7 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
                a.source_relative_path AS placement_path,0 AS is_shadow,
                NULL AS shadow_id,m.duration_seconds
         FROM assets a LEFT JOIN asset_media_info m ON m.asset_id=a.id
-        WHERE a.integrity_status IN ('ready','not_scanned') AND a.media_type IS NOT NULL
+        WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND a.integrity_status IN ('ready','not_scanned') AND a.media_type IS NOT NULL
         UNION ALL
         SELECT a.id AS asset_id,a.original_filename,a.media_type,a.display_title,
                COALESCE(s.series_title,a.series_title),s.channel_slug,s.daypart_slug,
@@ -4093,6 +4197,18 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
         WHERE s.status='ready' AND a.integrity_status IN ('ready','not_scanned')
         """
     ).fetchall()
+    rows = list(rows) + list(connection.execute("""
+        SELECT a.id AS asset_id,a.original_filename,a.media_type,a.display_title,
+               a.series_title,x.channel_slug,x.scope AS daypart_slug,NULL AS collection_type,
+               NULL AS collection_slug,NULL AS holiday_weekly_slug,a.review_status,
+               CASE WHEN r.enabled=1 AND es.availability='available' THEN a.enabled_for_scheduling ELSE 0 END AS enabled_for_scheduling,
+               a.source_relative_path AS placement_path,0 AS is_shadow,NULL AS shadow_id,
+               m.duration_seconds,r.absolute_path,'external' AS source_kind
+        FROM assets a JOIN external_assignments x ON x.root_id=a.source_root_id AND x.enabled=1
+        JOIN storage_roots r ON r.id=a.source_root_id JOIN external_sources es ON es.root_id=r.id
+        LEFT JOIN asset_media_info m ON m.asset_id=a.id
+        WHERE a.integrity_status IN ('ready','not_scanned')
+        """).fetchall())
     groups: dict[tuple[object, ...], dict[str, object]] = {}
     for raw in rows:
         row = dict(raw)
@@ -4129,7 +4245,8 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
             "daypart_slug": row["daypart_slug"], "asset_ids": set(),
             "ready_ids": set(), "review_ids": set(), "durations": {},
             "paths": [], "shadow_ids": set(), "placement_count": 0,
-            "row_kind": "shadow" if bool(row["is_shadow"]) else "native",
+            "row_kind": "external" if row.get("source_kind") == "external" else "shadow" if bool(row["is_shadow"]) else "native",
+            "physical_root": row.get("absolute_path"),
         })
         asset_id = int(row["asset_id"])
         group["asset_ids"].add(asset_id)
@@ -4238,6 +4355,7 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
         }
         item.update({
             "item_count": len(group["asset_ids"]),
+            "preview_asset_id": min(group["asset_ids"]),
             "ready_count": len(group["ready_ids"]),
             "review_count": len(group["review_ids"]),
             "shadow_count": len(group["shadow_ids"]),
@@ -4473,6 +4591,10 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     self._json({"error": str(exc)}, 400)
                     return
                 self._json(payload)
+                return
+            if parsed.path == "/api/external-media":
+                with closing(connect_database(database_path)) as connection:
+                    self._json(ExternalMediaService(connection, config).overview())
                 return
             if parsed.path == "/api/internet-media":
                 with connect_database(database_path) as connection:
@@ -5027,16 +5149,8 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     and video_parts[3] == "play"):
                 try:
                     asset_id = int(video_parts[2])
-                    with connect_database(database_path) as connection:
-                        row = connection.execute(
-                            "SELECT source_relative_path FROM assets WHERE id=?", (asset_id,)
-                        ).fetchone()
-                    if row is None:
-                        raise ValueError("Asset not found")
-                    root = config.storage_root("media").resolve()
-                    path = (root / Path(row["source_relative_path"])).resolve()
-                    if not path.is_relative_to(root):
-                        raise ValueError("Asset path escapes the media library")
+                    with closing(connect_database(database_path)) as connection:
+                        path = resolve_asset_path(connection, config, asset_id)
                     self._video_file(path)
                 except (ValueError, OSError, BrokenPipeError) as exc:
                     if not isinstance(exc, BrokenPipeError):
@@ -5052,7 +5166,9 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     return
                 where, values = _asset_query(params)
                 query = f"""
-                    SELECT a.*, m.duration_seconds, m.width, m.height,
+                    SELECT a.*, r.source_kind, r.absolute_path,
+                           (SELECT group_concat(x.channel_slug || " / " || x.scope, "; ") FROM external_assignments x WHERE x.root_id=a.source_root_id AND x.enabled=1) AS external_placements,
+                           m.duration_seconds, m.width, m.height,
                            m.video_codec, m.audio_codec,
                            n.analysis_status, n.detected_mode, n.proposed_mode,
                            n.override_mode, n.confidence, n.analysis_detail,
@@ -5070,6 +5186,7 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                            ,cdr.decision AS commercial_review_decision,
                            cdr.threshold_seconds AS commercial_review_threshold
                     FROM assets a
+                    JOIN storage_roots r ON r.id=a.source_root_id
                     LEFT JOIN asset_media_info m ON m.asset_id = a.id
                     LEFT JOIN normalization_profiles n ON n.asset_id = a.id
                     LEFT JOIN audio_normalization_profiles an ON an.asset_id = a.id
@@ -5165,6 +5282,45 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/api/external-media" or parsed.path.startswith("/api/external-media/"):
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 <= length <= 65536:
+                        raise ValueError("External media request is too large")
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    if not isinstance(payload, dict):
+                        raise ValueError("Request body must be an object")
+                    with closing(connect_database(database_path)) as connection:
+                        service = ExternalMediaService(connection, config)
+                        if parsed.path == "/api/external-media":
+                            result = service.register(payload)
+                        else:
+                            pieces = parsed.path.strip('/').split('/')
+                            if len(pieces) not in (3,4):
+                                raise ValueError("Unknown external media action")
+                            source_id = int(pieces[2])
+                            if len(pieces)==4 and pieces[3]=='rescan':
+                                source = service._source(source_id)
+                                if not source['enabled']:
+                                    raise ValueError("Reconnect the source before scanning")
+                                connection.execute("UPDATE external_sources SET scan_status='pending' WHERE root_id=?", (source_id,))
+                                connection.commit()
+                                result = {'root_id': source_id}
+                            elif len(pieces)==3:
+                                result = service.update(source_id,payload)
+                            else:
+                                raise ValueError("Unknown external media action")
+                        if runtime is None:
+                            if parsed.path == '/api/external-media' or parsed.path.endswith('/rescan'):
+                                result['scan'] = service.scan(result['root_id'])
+                    if runtime is not None:
+                        result['queued'] = True
+                        runtime.request_maintenance()
+                    self._json(result, 202 if runtime is not None else 200)
+                except (ValueError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:
+                    self._json({'error': str(exc)},400)
+                return
+
             if parsed.path in {"/api/weather-graphics/upload", "/api/weather-graphics/generate"}:
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
@@ -5436,12 +5592,16 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     if length > 8192:
                         raise ValueError("Folder request is too large")
                     payload = json.loads(self.rfile.read(length) or b"{}")
-                    relative = Path(str(payload.get("path", "")).strip())
-                    if not str(relative) or relative.is_absolute():
-                        raise ValueError("Invalid media folder")
-                    media_root = config.storage_root("media").resolve()
-                    folder = (media_root / relative).resolve()
-                    folder.relative_to(media_root)
+                    if payload.get('asset_id') is not None:
+                        with closing(connect_database(database_path)) as connection:
+                            folder = resolve_asset_path(connection,config,int(payload['asset_id'])).parent
+                    else:
+                        relative = Path(str(payload.get("path", "")).strip())
+                        if not str(relative) or relative.is_absolute():
+                            raise ValueError("Invalid media folder")
+                        media_root = config.storage_root("media").resolve()
+                        folder = (media_root / relative).resolve()
+                        folder.relative_to(media_root)
                     if not folder.is_dir():
                         raise ValueError("Media folder no longer exists")
                     if sys.platform == "win32":

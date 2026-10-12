@@ -14,6 +14,17 @@ from retrotv.web import (
 )
 
 
+def add_storage_fixture(connection):
+    """Include physical-root ownership in otherwise minimal inventory fixtures."""
+    connection.execute("ALTER TABLE assets ADD COLUMN source_root_id INTEGER DEFAULT 1")
+    connection.executescript("""
+        CREATE TABLE storage_roots(id INTEGER PRIMARY KEY,logical_name TEXT,source_kind TEXT,absolute_path TEXT,enabled INTEGER);
+        INSERT INTO storage_roots VALUES(1,'media','managed',NULL,1);
+        CREATE TABLE external_sources(root_id INTEGER,availability TEXT);
+        CREATE TABLE external_assignments(id INTEGER,root_id INTEGER,channel_slug TEXT,scope TEXT,enabled INTEGER);
+    """)
+
+
 class WebLibraryTests(unittest.TestCase):
     def test_library_exposes_advisory_holiday_filename_review(self):
         self.assertIn("Holiday Filename Review", INDEX_HTML)
@@ -134,6 +145,7 @@ class WebLibraryTests(unittest.TestCase):
                 project_root=root,
                 data={"storage_roots": {"media": str(media)}},
             )
+            add_storage_fixture(connection)
             self.assertEqual(forget_missing_asset_record(connection, config, 1), 1)
             self.assertIsNone(
                 connection.execute("SELECT * FROM assets WHERE id=1").fetchone()
@@ -191,6 +203,7 @@ class WebLibraryTests(unittest.TestCase):
             );
             """
         )
+        add_storage_fixture(connection)
         connection.execute("ALTER TABLE assets ADD COLUMN holiday_weekly_slug TEXT")
         connection.execute("ALTER TABLE shadow_files ADD COLUMN holiday_weekly_slug TEXT")
         rows = [
@@ -239,6 +252,7 @@ class WebLibraryTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO asset_media_info VALUES (?, ?)", (row[0], row[-1])
             )
+        add_storage_fixture(connection)
         connection.execute("ALTER TABLE assets ADD COLUMN holiday_weekly_slug TEXT")
         connection.execute("ALTER TABLE shadow_files ADD COLUMN holiday_weekly_slug TEXT")
         result = _media_inventory(connection)
@@ -308,6 +322,7 @@ class WebLibraryTests(unittest.TestCase):
             "INSERT INTO recurring_lineup_snapshots VALUES(1,1,'2099-10-01',?)",
             (json.dumps(state),),
         )
+        add_storage_fixture(connection)
         item = next(row for row in _media_inventory(connection)["items"]
                     if row["title"] == "Bewitched")
         self.assertFalse(item["recurring_unplaced"])

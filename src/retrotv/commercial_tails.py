@@ -9,6 +9,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from retrotv.asset_paths import checked_replace, checked_unlink
 from retrotv.db import ensure_storage_root, transaction, utc_now
 from retrotv.probe import fingerprint_file, probe_media
 from retrotv.promotion import sha256_file
@@ -32,7 +33,7 @@ class CommercialTailService:
                    m.duration_seconds
             FROM assets a JOIN asset_media_info m ON m.asset_id=a.id
             LEFT JOIN commercial_tail_analyses t ON t.asset_id=a.id
-            WHERE a.media_type='commercial' AND a.metadata_status='ready'
+            WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND a.media_type='commercial' AND a.metadata_status='ready'
               AND a.integrity_status='ready' AND m.duration_seconds>=8
               AND (t.asset_id IS NULL OR t.policy_version!=?
                    OR t.source_fingerprint!=COALESCE(a.fingerprint,'')
@@ -96,6 +97,8 @@ class CommercialTailService:
     def analyze_asset(self, asset_id: int) -> str:
         from retrotv.processing import require_enabled
         require_enabled(self.config, "commercial_tails")
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         row = self.connection.execute("""
             SELECT a.*,m.duration_seconds FROM assets a
             JOIN asset_media_info m ON m.asset_id=a.id WHERE a.id=?
@@ -174,14 +177,14 @@ class CommercialTailService:
                 partial = backup.with_name(backup.name + ".partial")
                 shutil.copy2(source, partial)
                 if sha256_file(partial) != original_hash:
-                    partial.unlink(missing_ok=True)
+                    checked_unlink(self.connection, partial, missing_ok=True)
                     raise RuntimeError("Original commercial backup verification failed")
-                os.replace(partial, backup)
+                checked_replace(self.connection, partial, backup)
             corrected_hash = sha256_file(work)
             shutil.copy2(work, install)
             if sha256_file(install) != corrected_hash:
                 raise RuntimeError("Corrected commercial install verification failed")
-            os.replace(install, target)
+            checked_replace(self.connection, install, target)
             try:
                 stat = target.stat()
                 corrected_fingerprint, algorithm = fingerprint_file(target, mode="quick")
@@ -245,7 +248,7 @@ class CommercialTailService:
                           original_hash,corrected_hash,detail,utc_now()))
                 if target != source:
                     try:
-                        source.unlink()
+                        checked_unlink(self.connection, source)
                     except OSError:
                         # The corrected copy and DB are already committed. A
                         # later scan can flag this leftover original safely.
@@ -254,11 +257,11 @@ class CommercialTailService:
                 if target == source:
                     restore = source.with_name(f".{source.name}.tail-restore.partial")
                     shutil.copy2(backup, restore)
-                    os.replace(restore, source)
+                    checked_replace(self.connection, restore, source)
                 else:
-                    target.unlink(missing_ok=True)
+                    checked_unlink(self.connection, target, missing_ok=True)
                 raise
             return "trimmed"
         finally:
-            work.unlink(missing_ok=True)
-            install.unlink(missing_ok=True)
+            checked_unlink(self.connection, work, missing_ok=True)
+            checked_unlink(self.connection, install, missing_ok=True)

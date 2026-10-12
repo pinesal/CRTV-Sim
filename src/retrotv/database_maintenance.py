@@ -166,6 +166,7 @@ class DatabaseHousekeepingService:
             removed["missing_assets"] = self._delete_count(
                 """DELETE FROM assets
                    WHERE integrity_status='missing' AND review_status='ignored'
+                     AND source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed')
                      AND last_seen_at < ?
                      AND NOT EXISTS (SELECT 1 FROM schedule_entries se WHERE se.asset_id=assets.id)
                      AND NOT EXISTS (SELECT 1 FROM remote_episodes re WHERE re.asset_id=assets.id)

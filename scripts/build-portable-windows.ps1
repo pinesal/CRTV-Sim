@@ -1,7 +1,8 @@
 param(
     [string]$Python = '.venv\Scripts\python.exe',
-    [string]$Output = 'dist\CRTV-Sim-Portable-0.9.47',
-    [string]$MediaRoot = '../Videos/media'
+    [string]$Output = 'dist\CRTV-Sim-Portable-0.9.48',
+    [string]$MediaRoot = '../Videos/media',
+    [switch]$SkipArchive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,7 +117,7 @@ Copy-TreeMissing -Source (Join-Path $safeStopFrozen '_internal') -Destination (J
 Copy-TreeReplace -Source (Join-Path $projectRoot 'assets') -Destination (Join-Path $outputRoot 'assets')
 Copy-TreeReplace -Source (Join-Path $projectRoot 'migrations') -Destination (Join-Path $outputRoot 'migrations')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'pyproject.toml') -Destination (Join-Path $outputRoot 'pyproject.toml') -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\RELEASE_0.9.47.md') -Destination (Join-Path $outputRoot 'RELEASE-NOTES.md') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\RELEASE_0.9.48.md') -Destination (Join-Path $outputRoot 'RELEASE-NOTES.md') -Force
 if (Test-Path -LiteralPath (Join-Path $priorInternetBuild 'RetroTV.exe')) {
     Write-Utf8NoBom -Path (Join-Path $outputRoot 'previous-build.path') -Content "..\RetroTV-Portable-Internet-Media-0.9.45`n..\RetroTV-Portable-Internet-Media-0.9.44`n..\RetroTV-Portable-Internet-Media-0.9.43`n"
 } elseif (Test-Path -LiteralPath (Join-Path $olderInternetBuild 'RetroTV.exe')) {
@@ -185,10 +186,12 @@ foreach ($notice in @('mpv-Copyright.txt', 'mpv-LICENSE.GPL.txt', 'Vulkan-Loader
         throw "Required bundled media-tool notice is missing: $notice"
     }
 }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.ps1') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.47.ps1') -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.cmd') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.47.cmd') -Force
-& $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') $outputRoot --archive
-if ($LASTEXITCODE -ne 0) { throw 'Public archive verification failed.' }
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.ps1') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.48.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.cmd') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.48.cmd') -Force
+if (-not $SkipArchive) {
+    & $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') $outputRoot --archive
+    if ($LASTEXITCODE -ne 0) { throw 'Public archive verification failed.' }
+}
 
 $size = (Get-ChildItem -LiteralPath $outputRoot -File -Recurse | Measure-Object Length -Sum).Sum
 Write-Output ("Portable build ready: {0} ({1:N1} MB)" -f $outputRoot, ($size / 1MB))

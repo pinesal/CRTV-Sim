@@ -7,6 +7,7 @@ import shutil
 import uuid
 from pathlib import Path
 
+from retrotv.asset_paths import checked_replace, checked_unlink
 from retrotv.db import transaction, utc_now
 from retrotv.normalization import NormalizationService
 from retrotv.probe import fingerprint_file, probe_media
@@ -26,8 +27,12 @@ class NormalizationReviewService:
         recovered = 0
         for journal in self._journal_root().glob("*.json"):
             data = json.loads(journal.read_text(encoding="utf-8"))
+            from retrotv.asset_paths import require_managed_asset, require_writable_path
+            require_managed_asset(self.connection, self.config, data['asset_id'])
             source, target, rollback = [(root / data[key]).resolve()
                                         for key in ("source", "target", "rollback")]
+            for path in (source, target, rollback):
+                require_writable_path(self.connection, path)
             if not all(path.is_relative_to(root) for path in (source, target, rollback)):
                 raise ValueError("Re-review recovery path escapes the media root")
             row = self.connection.execute("""SELECT a.source_relative_path,n.review_requested
@@ -40,22 +45,24 @@ class NormalizationReviewService:
                 if committed:
                     if not target.is_file() or sha256_file(target) != data["original_sha256"]:
                         raise ValueError("Restored file changed before recovery; files were preserved")
-                    rollback.unlink()
+                    checked_unlink(self.connection, rollback)
                 else:
                     if source != target and source.exists():
                         raise ValueError("Recovery source is occupied; files were preserved")
                     if target.exists():
                         if sha256_file(target) != data["original_sha256"]:
                             raise ValueError("Recovery destination changed; files were preserved")
-                        target.unlink()
-                    os.replace(rollback, source)
-            journal.unlink()
+                        checked_unlink(self.connection, target)
+                    checked_replace(self.connection, rollback, source)
+            checked_unlink(self.connection, journal)
             recovered += 1
         return recovered
 
     def reopen(self, asset_id: int, *, active_path: str | None = None) -> dict:
         from retrotv.processing import require_enabled
         require_enabled(self.config, "normalization")
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         row = self.connection.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
         if row is None:
             raise ValueError("The playing asset is no longer indexed")
@@ -118,16 +125,16 @@ class NormalizationReviewService:
                     "target": target.relative_to(root).as_posix(),
                     "rollback": rollback.relative_to(root).as_posix(),
                     "working_sha256": sha256_file(source), "original_sha256": selected["original_sha256"]}), encoding="utf-8")
-                os.replace(journal_partial, journal)
-                os.replace(source, rollback)
+                checked_replace(self.connection, journal_partial, journal)
+                checked_replace(self.connection, source, rollback)
                 try:
-                    os.replace(staging, target)
+                    checked_replace(self.connection, staging, target)
                 except Exception:
-                    os.replace(rollback, source)
-                    journal.unlink(missing_ok=True)
+                    checked_replace(self.connection, rollback, source)
+                    checked_unlink(self.connection, journal, missing_ok=True)
                     raise
             finally:
-                staging.unlink(missing_ok=True)
+                checked_unlink(self.connection, staging, missing_ok=True)
         try:
             NormalizationService(self.connection, self.config).discard_previews((asset_id,))
             fingerprint, algorithm = fingerprint_file(target, mode="quick")
@@ -172,14 +179,14 @@ class NormalizationReviewService:
                     VALUES (?,'pending',1,'User requested a fresh normalization review.')""", (asset_id,))
         except Exception:
             if rollback and rollback.exists():
-                target.unlink(missing_ok=True)
-                os.replace(rollback, source)
-                journal.unlink(missing_ok=True)
+                checked_unlink(self.connection, target, missing_ok=True)
+                checked_replace(self.connection, rollback, source)
+                checked_unlink(self.connection, journal, missing_ok=True)
             raise
         if rollback:
-            rollback.unlink(missing_ok=True)
+            checked_unlink(self.connection, rollback, missing_ok=True)
         if journal:
-            journal.unlink(missing_ok=True)
+            checked_unlink(self.connection, journal, missing_ok=True)
         normalization = NormalizationService(self.connection, self.config)
         normalization.discard_previews((asset_id,))
         result = normalization.analyze_asset(asset_id)

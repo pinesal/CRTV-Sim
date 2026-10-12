@@ -151,7 +151,7 @@ class GuideService:
             FROM assets a
             JOIN normalization_profiles n ON n.asset_id = a.id
             JOIN asset_media_info m ON m.asset_id = a.id
-            WHERE a.review_status = 'ready'
+            WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND a.review_status = 'ready'
               AND a.metadata_status = 'ready'
               AND a.integrity_status = 'ready'
               AND n.analysis_status = 'analyzed'
@@ -186,7 +186,7 @@ class GuideService:
                 FROM assets a
                 JOIN asset_media_info m ON m.asset_id=a.id
                 LEFT JOIN audio_normalization_profiles p ON p.asset_id=a.id
-                WHERE a.review_status='ready'
+                WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND a.review_status='ready'
                   AND a.metadata_status='ready'
                   AND a.integrity_status IN ('ready', 'not_scanned')
                   AND a.enabled_for_scheduling=1

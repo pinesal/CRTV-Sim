@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from retrotv.config import AppConfig
+from retrotv.asset_paths import checked_replace, checked_unlink
 from retrotv.db import ensure_storage_root, transaction, utc_now
 from retrotv.probe import fingerprint_file, probe_media
 from retrotv.promotion import sha256_file
@@ -129,6 +130,8 @@ class AudioNormalizationService:
         return f"{int(row['file_size'])}:{int(row['modified_ns'])}"
 
     def _asset(self, asset_id: int):
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         row = self.connection.execute(
             """
             SELECT a.*, m.duration_seconds, m.video_codec, m.audio_codec,
@@ -172,7 +175,7 @@ class AudioNormalizationService:
             FROM assets a
             JOIN asset_media_info m ON m.asset_id=a.id
             LEFT JOIN audio_normalization_profiles p ON p.asset_id=a.id
-            WHERE a.review_status='ready'
+            WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND a.review_status='ready'
               AND a.metadata_status='ready'
               AND a.integrity_status IN ('ready', 'not_scanned')
               AND a.enabled_for_scheduling=1
@@ -390,7 +393,7 @@ class AudioNormalizationService:
             f"""
             SELECT a.id, a.source_relative_path, p.*
             FROM audio_normalization_profiles p JOIN assets a ON a.id=p.asset_id
-            WHERE p.analysis_status='analyzed'
+            WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND p.analysis_status='analyzed'
               AND p.needs_correction=1
               AND p.approval_status='approved'
               AND p.correction_status IN ('pending', 'normalizing', 'error', 'stale')
@@ -404,6 +407,8 @@ class AudioNormalizationService:
         ).fetchall()
 
     def resolve_review(self, asset_id: int, action: str) -> None:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         profile = self.connection.execute(
             "SELECT * FROM audio_normalization_profiles WHERE asset_id=?",
             (asset_id,),
@@ -480,17 +485,17 @@ class AudioNormalizationService:
             pass
         else:
             backup_partial = backup.with_name(backup.name + ".partial")
-            backup_partial.unlink(missing_ok=True)
+            checked_unlink(self.connection, backup_partial, missing_ok=True)
             shutil.copy2(source, backup_partial)
             if sha256_file(backup_partial) != original_hash:
-                backup_partial.unlink(missing_ok=True)
+                checked_unlink(self.connection, backup_partial, missing_ok=True)
                 raise RuntimeError("Pre-audio backup verification failed")
-            os.replace(backup_partial, backup)
+            checked_replace(self.connection, backup_partial, backup)
 
         partial = source.with_name(
             f".{source.stem}.retrotv-audio.partial{source.suffix.lower()}"
         )
-        partial.unlink(missing_ok=True)
+        checked_unlink(self.connection, partial, missing_ok=True)
         self.connection.execute(
             "UPDATE audio_normalization_profiles SET correction_status='normalizing', error=NULL WHERE asset_id=?",
             (asset_id,),
@@ -549,7 +554,7 @@ class AudioNormalizationService:
             # Some malformed/legacy AAC tracks can trip an FFmpeg AAC encoder
             # assertion even though they decode normally. MP3 is valid in the
             # containers handled here and gives these rare files a safe retry.
-            partial.unlink(missing_ok=True)
+            checked_unlink(self.connection, partial, missing_ok=True)
             fallback_codec_args = self._fallback_audio_codec_args(source.suffix.lower())
             fallback_args = args[: -len(codec_args) - 1]
             fallback_args.extend([*fallback_codec_args, os.fspath(partial)])
@@ -597,7 +602,7 @@ class AudioNormalizationService:
         corrected_hash = sha256_file(partial)
         installed = False
         try:
-            os.replace(partial, source)
+            checked_replace(self.connection, partial, source)
             installed = True
             stat = source.stat()
             fingerprint, algorithm = fingerprint_file(source, mode="quick")
@@ -673,7 +678,7 @@ class AudioNormalizationService:
             if installed:
                 restore = source.with_name(f".{source.name}.retrotv-audio-restore.partial")
                 shutil.copy2(backup, restore)
-                os.replace(restore, source)
+                checked_replace(self.connection, restore, source)
             raise
         return AudioNormalizationResult(asset_id, source, backup, promotion_id)
 
@@ -706,7 +711,7 @@ class AudioNormalizationService:
     def _normalization_failed(
         self, asset_id: int, partial: Path, error: str
     ) -> AudioNormalizationResult:
-        partial.unlink(missing_ok=True)
+        checked_unlink(self.connection, partial, missing_ok=True)
         self.connection.execute(
             """
             UPDATE audio_normalization_profiles

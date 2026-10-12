@@ -589,6 +589,7 @@ class ApplicationRuntime:
             current = controller.current if controller else None
             if self.tv_state == "starting" and current is not None:
                 self.tv_state = "playing"
+            external = bool(current and getattr(current, 'external', False))
             synthetic_channels = self._synthetic_status()
             return {
                 "runtime": "running" if self.started_at else "stopped",
@@ -606,6 +607,7 @@ class ApplicationRuntime:
                     {
                         "title": current.title,
                         "asset_id": current.asset_id,
+                        "external": external,
                         "missing_media": current.missing_media,
                         "entry_type": current.entry_type,
                         "representation": current.representation,
@@ -922,12 +924,17 @@ class ApplicationRuntime:
                 self._pause_internet_writer()
                 scan_started = True
                 with connect_database(self.config.database_path) as connection:
-                    LibraryScanner(connection, self.config).scan(
-                        skip_samples=True, cancel_requested=self.stop_event.is_set)
+                    from retrotv.asset_paths import is_external, resolve_asset_path
+                    if is_external(connection, missing['asset_id']):
+                        from retrotv.external_media import ExternalMediaService
+                        root_id = connection.execute('SELECT source_root_id FROM assets WHERE id=?', (missing['asset_id'],)).fetchone()[0]
+                        ExternalMediaService(connection, self.config).scan(root_id, cancel_event=self.stop_event)
+                    else:
+                        LibraryScanner(connection, self.config).scan(
+                            skip_samples=True, cancel_requested=self.stop_event.is_set)
                     row = connection.execute("SELECT source_relative_path FROM assets WHERE id=?",
                                              (missing["asset_id"],)).fetchone()
-                    repaired = bool(row and (self.config.storage_root("media") /
-                                            row["source_relative_path"]).is_file())
+                    repaired = bool(row and resolve_asset_path(connection, self.config, missing["asset_id"]).is_file())
                 with self.lock:
                     self.playback_recovery.update(state="queued" if self._missing_scan_pending else
                                                   "recovered" if repaired else "missing")
@@ -2160,7 +2167,13 @@ class ApplicationRuntime:
             scan = LibraryScanner(connection, self.config).scan(
                 cancel_requested=self._maintenance_should_stop
             )
+            from retrotv.external_media import ExternalMediaService
+            class ScanCancellation:
+                def is_set(inner):
+                    return self._maintenance_should_stop()
+            external_scans = ExternalMediaService(connection, self.config).scan_all(cancel_event=ScanCancellation())
             with self.lock:
+                self.maintenance['external_scans'] = external_scans
                 self.maintenance["scan"] = {
                     "discovered": scan.discovered,
                     "new_or_changed_ready": scan.ready,
@@ -2228,7 +2241,7 @@ class ApplicationRuntime:
                     SELECT n.asset_id
                     FROM normalization_profiles n
                     JOIN assets a ON a.id = n.asset_id
-                    WHERE n.analysis_status = 'pending'
+                    WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND n.analysis_status = 'pending'
                       AND a.metadata_status = 'ready'
                       AND a.integrity_status IN ('ready', 'not_scanned')
                     ORDER BY n.asset_id
@@ -2264,7 +2277,7 @@ class ApplicationRuntime:
                 SELECT n.asset_id, n.source_preview_relative_path
                 FROM normalization_profiles n
                 JOIN assets a ON a.id=n.asset_id
-                WHERE n.analysis_status='review'
+                WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND n.analysis_status='review'
                   AND a.metadata_status='ready'
                   AND a.integrity_status IN ('ready', 'not_scanned')
                 ORDER BY n.asset_id
@@ -2846,7 +2859,7 @@ class ApplicationRuntime:
                 FROM assets a
                 JOIN normalization_profiles n ON n.asset_id = a.id
                 JOIN asset_media_info m ON m.asset_id = a.id
-                WHERE a.review_status = 'ready'
+                WHERE a.source_root_id IN (SELECT id FROM storage_roots WHERE source_kind='managed') AND a.review_status = 'ready'
                   AND a.metadata_status = 'ready'
                   AND a.integrity_status = 'ready'
                   AND n.analysis_status = 'analyzed'

@@ -10,11 +10,12 @@ import subprocess
 import threading
 import time as time_module
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping
 
+from retrotv.asset_paths import resolve_asset_path, is_external
 from retrotv.config import AppConfig
 from retrotv.scheduling import ScheduleBuilder
 from retrotv.synthetic import (
@@ -112,6 +113,7 @@ class PlaybackTarget:
     loop_duration_seconds: float | None = None
     video_filter: str | None = None
     missing_media: dict | None = None
+    external: bool = False
 
 
 class PlaybackError(RuntimeError):
@@ -504,6 +506,7 @@ class ScheduleResolver:
                 f"No schedule entry covers {when.isoformat()}",
             )
         row, starts, ends = selected
+        external = row['asset_id'] is not None and is_external(self.connection, row['asset_id'])
         elapsed = max(0.0, (when - starts).total_seconds())
         remaining = max(0.0, (ends - when).total_seconds())
         media_offset = float(row["media_start_ms"] or 0) / 1000 + elapsed
@@ -591,7 +594,8 @@ class ScheduleResolver:
                 )
             )
             if (
-                output_policy == "proxy"
+                not external
+                and output_policy == "proxy"
                 and row["proxy_status"] == "ready"
                 and row["proxy_relative_path"]
             ):
@@ -603,12 +607,13 @@ class ScheduleResolver:
                     path = candidate
                     representation = "corrected_staging"
             if path is None and row["source_relative_path"]:
-                candidate = (
-                    self.config.storage_root("media")
-                    / Path(row["source_relative_path"])
-                )
+                try:
+                    candidate = resolve_asset_path(self.connection, self.config, row["asset_id"])
+                except (ValueError, OSError):
+                    fallback = self._resolve_channel_fallback(channel_slug, when, "Invalid source path")
+                    fallback_end = min(ends, fallback.ends_at)
+                    return replace(fallback, ends_at=fallback_end, remaining_seconds=(fallback_end-when).total_seconds())
                 if not candidate.is_file():
-                    from dataclasses import replace
                     missing = {"asset_id": int(row["asset_id"]), "path": str(candidate),
                                "channel": channel_slug, "entry_id": int(row["id"])}
                     if self.missing_media_handler:
@@ -638,6 +643,7 @@ class ScheduleResolver:
             media_offset,
             remaining,
             channel_slug,
+            external=external,
         )
 
     def _resolve_synthetic(

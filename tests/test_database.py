@@ -56,6 +56,7 @@ class DatabaseTests(unittest.TestCase):
                         "032_recurring_lineup_state.sql",
                         "033_normalization_rereview.sql",
                         "034_profile_tts_providers.sql",
+                        "035_external_media.sql",
                     ],
                 )
                 self.assertEqual(

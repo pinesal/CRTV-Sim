@@ -11,6 +11,21 @@ aspect analysis, corrected-media replacement with verified backups, persistent
 date-aware schedules, complete blocks, join-in-progress playback, a rendered TV
 Guide channel, and a unified Windows application dashboard with automation.
 
+## Existing series folders (Phase 1A)
+
+You can also use an existing local or network series folder without rearranging
+it. In **Library & Schedules → External Media Sources**, enter the folder path,
+series title, scheduled channel and daypart, then choose **Add & Scan**. A source
+can have multiple explicit channel/daypart assignments and is indexed once.
+
+External files are always read-only: CRTV Sim does not normalize, trim, move,
+rename, replace or delete them. Random and recurring scheduled channels use the
+existing scheduling system. At Your Pace integration is deferred to Phase 1B;
+its existing Internet Media playlist and progress remain unchanged.
+
+See [the external-media guide](docs/EXTERNAL_MEDIA.md) for architecture, safety,
+network access, rescanning and current limitations.
+
 ## Why CRTV Sim?
 
 CRTV Sim builds always-on TV channels directly from your video files. It does

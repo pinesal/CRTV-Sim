@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from retrotv.config import AppConfig
+from retrotv.asset_paths import checked_replace, checked_unlink
 from retrotv.db import ensure_storage_root, utc_now
 from retrotv.probe import decode_sample, probe_media
 from retrotv.process_control import run_cancellable
@@ -316,6 +317,8 @@ class NormalizationService:
         self.duration_tolerance = float(settings.get("duration_tolerance_seconds", 1.0))
 
     def _asset(self, asset_id: int):
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         row = self.connection.execute(
             """
             SELECT a.*, m.duration_seconds, m.bit_rate, m.width, m.height,
@@ -508,6 +511,8 @@ class NormalizationService:
         mode: str,
         crop: Crop | None,
     ) -> None:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         self.connection.execute(
             """
             INSERT INTO normalization_profiles(
@@ -645,6 +650,8 @@ class NormalizationService:
         }
 
     def approve_review(self, asset_id: int) -> str:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         profile = self._profile(asset_id)
         if profile is None:
             raise ValueError(f"Asset {asset_id} has not been analyzed")
@@ -751,7 +758,7 @@ class NormalizationService:
             else _run(args, 60.0)
         )
         if completed.returncode:
-            partial.unlink(missing_ok=True)
+            checked_unlink(self.connection, partial, missing_ok=True)
             raise RuntimeError(completed.stderr.strip()[-1000:])
         partial.replace(target)
 
@@ -895,6 +902,8 @@ class NormalizationService:
         }
 
     def approve_preview(self, asset_id: int, token: str) -> str:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         """Approve exactly the correction represented by a current preview."""
         recipe = self.preview_recipe(asset_id)
         if recipe is None or not token or token != recipe["token"]:
@@ -905,6 +914,8 @@ class NormalizationService:
         return self.approve_review(asset_id)
 
     def approve_folder_preview(self, asset_id: int, token: str) -> dict[str, Any]:
+        from retrotv.asset_paths import require_managed_asset
+        require_managed_asset(self.connection, self.config, asset_id)
         """Apply the exact displayed correction to the asset's review folder."""
         recipe = self.preview_recipe(asset_id)
         if recipe is None or not token or token != recipe["token"]:
@@ -919,14 +930,14 @@ class NormalizationService:
         preview_root = self.config.storage_root("previews").resolve()
         for asset_id in asset_ids:
             try:
-                self._preview_recipe_path(int(asset_id)).unlink(missing_ok=True)
+                checked_unlink(self.connection, self._preview_recipe_path(int(asset_id)), missing_ok=True)
             except OSError as exc:
                 errors.append(f"{self._preview_recipe_path(int(asset_id))}: {exc}")
             for kind in ("source", "normalized"):
                 for index in range(1, 4):
                     extra = preview_root / f"{int(asset_id)}-{kind}-{index}.jpg"
                     try:
-                        extra.unlink(missing_ok=True)
+                        checked_unlink(self.connection, extra, missing_ok=True)
                     except OSError as exc:
                         errors.append(f"{extra}: {exc}")
             row = self.connection.execute(
@@ -948,7 +959,7 @@ class NormalizationService:
                 candidate = (preview_root / Path(str(value))).resolve()
                 try:
                     candidate.relative_to(preview_root)
-                    candidate.unlink(missing_ok=True)
+                    checked_unlink(self.connection, candidate, missing_ok=True)
                 except (OSError, ValueError) as exc:
                     errors.append(f"{candidate}: {exc}")
                 else:
@@ -1357,7 +1368,7 @@ class NormalizationService:
                     output_size=partial.stat().st_size,
                 )
                 size_retries += 1
-                partial.unlink(missing_ok=True)
+                checked_unlink(self.connection, partial, missing_ok=True)
                 continue
 
             if size_error is not None and self.accept_oversize_after_retries:
@@ -1385,7 +1396,7 @@ class NormalizationService:
 
         if validation is not None:
             return self._proxy_failed(asset_id, partial, validation)
-        os.replace(partial, output)
+        checked_replace(self.connection, partial, output)
         probe = probe_media(
             output, ffprobe=self.config.ffprobe, timeout_seconds=30.0
         )
@@ -1411,7 +1422,7 @@ class NormalizationService:
 
     def _proxy_failed(self, asset_id: int, partial: Path, error: str) -> ProxyResult:
         if partial.is_file():
-            partial.unlink()
+            checked_unlink(self.connection, partial)
         self.connection.execute(
             """
             UPDATE normalization_profiles

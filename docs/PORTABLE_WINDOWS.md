@@ -1,8 +1,10 @@
 # CRTV Sim portable Windows build
 
 Build from the project root with `.\scripts\build-portable-windows.ps1`.
-The current build target is `dist/CRTV-Sim-Portable-0.9.47`, with an adjacent
-`CRTV-Sim-0.9.47-Windows.zip` and SHA256 checksum. The ZIP includes the empty
+The current build target is `dist/CRTV-Sim-Portable-0.9.48`. Add
+`-SkipArchive` for internal testing when you only need the unpacked build.
+Without that option, the build also creates an adjacent
+`CRTV-Sim-0.9.48-Windows.zip` and SHA256 checksum. The ZIP includes the empty
 `Media` scaffold, CRTV Sim, optional RetroWeather, FFmpeg, FFprobe, mpv, fonts,
 migrations and clean portable defaults. Run `CRTV-Sim.exe` after extracting.
 The existing RetroTV packages remain unchanged until a new build is requested.

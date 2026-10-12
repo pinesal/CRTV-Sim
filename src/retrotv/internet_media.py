@@ -315,6 +315,9 @@ class InternetMediaService:
             raise ValueError("Channel name is required")
         mode = str(payload.get("playback_mode", "scheduled"))
         storage = str(payload.get("storage_mode", "keep"))
+        if mode == 'watch_at_your_pace':
+            from retrotv.external_media import require_scheduled_channel
+            require_scheduled_channel(self.connection, slug)
         if mode not in {"scheduled", "watch_at_your_pace"}:
             raise ValueError("Unknown channel playback mode")
         if storage not in {"keep", "save_space"}:
