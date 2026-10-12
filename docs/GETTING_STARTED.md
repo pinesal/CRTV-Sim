@@ -69,6 +69,51 @@ The **shared** folder is for items that can be considered by multiple channels,
 such as commercials or episodes. Shared items are used alongside channel
 content when their daypart and channel eligibility allow it.
 
+### Optional background music
+
+Music is separate from program audio, commercials, and bumpers. Supported
+formats are MP3, WAV, M4A, AAC, FLAC, Ogg, and Opus. CRTV Sim loops the selected
+track to fit the screen and keeps it quiet under Up Next narration.
+
+For a channel's Up Next screens and station interstitials, drop music into that
+channel's `graphics` folders. For example:
+
+```text
+Nickelodeon/graphics/music/                         applies to all graphics
+Nickelodeon/graphics/up-next/music/                 Up Next only
+Nickelodeon/graphics/interstitials/music/           interstitials only
+Nickelodeon/graphics/night/music/                   nighttime graphics
+Nickelodeon/graphics/night/up-next/music/           nighttime Up Next only
+Nickelodeon/graphics/holidays/halloween/up-next/music/
+Nickelodeon/graphics/night/holidays/halloween/interstitials/music/
+Nickelodeon/specials/weekly/snick-main/up-next/music/
+```
+
+CRTV Sim selects one soundtrack rather than mixing tracks from several folders.
+For a weekly special, its matching purpose folder has first priority. Otherwise,
+the fallback order is: active holiday plus current daypart and purpose; current
+daypart and purpose; current daypart general music; active holiday and purpose;
+channel-wide purpose; then channel-wide general music. For example, a track in
+`graphics/night/up-next/music` is used for Nick at Nite Up Next screens when it
+exists; otherwise CRTV Sim tries the next matching scope. Add more than one
+track to a folder to let CRTV Sim choose among them. Use the same structure under
+another channel folder to give that channel its own soundtrack.
+
+The Weather channel has a separate music library inside the RetroWeather folder
+by default, not under `Media/<channel>/graphics`:
+
+```text
+RetroWeather/retroweather-media/music/default/
+RetroWeather/retroweather-media/music/conditions/rainy/
+RetroWeather/retroweather-media/music/conditions/stormy/
+RetroWeather/retroweather-media/music/conditions/snowy/
+RetroWeather/retroweather-media/music/conditions/foggy/
+```
+
+Weather uses a matching condition folder when it has a valid track, then falls
+back to `music/default`; if neither has music, it uses silence. You can open the
+Weather media folder from the RetroWeather dashboard and add tracks there.
+
 ## How commercials, bumpers, and interstitials work
 
 These are three different kinds of station material:

@@ -11,6 +11,12 @@ aspect analysis, corrected-media replacement with verified backups, persistent
 date-aware schedules, complete blocks, join-in-progress playback, a rendered TV
 Guide channel, and a unified Windows application dashboard with automation.
 
+## Development
+
+CRTV Sim is developed by its maintainer with assistance from OpenAI Codex, an
+AI coding tool. The project direction, requirements, and release decisions are
+human-led.
+
 ## Why CRTV Sim?
 
 CRTV Sim builds always-on TV channels directly from your video files. It does
@@ -1013,12 +1019,22 @@ sample without saving the profile. Temporary voice-test files are removed by
 generated-file cleanup. The Settings startup-channel selector also includes the
 CRTV Sim Guide.
 
-Music files may be dropped directly into these folders. Audio in the channel's
-`graphics` root applies to every graphic. Audio in `up-next` or
-`interstitials` overrides that root music for its purpose, and audio in a
-holiday purpose folder has highest precedence during that holiday. Supported
-formats are MP3, WAV, M4A, AAC, FLAC, Ogg, and Opus. Music loops for the graphic
-duration and is mixed quietly beneath Up Next narration.
+Optional graphic music uses MP3, WAV, M4A, AAC, FLAC, Ogg, or Opus files placed
+inside a channel's graphics folders. For example,
+`<channel>/graphics/music/` is the general soundtrack, while
+`<channel>/graphics/up-next/music/` and
+`<channel>/graphics/interstitials/music/` are purpose-specific. Daypart,
+holiday, and weekly-special folders can narrow the scope further. The most
+specific matching folder takes precedence; when it has no valid track, CRTV Sim
+falls back to the next broader applicable scope. Tracks loop to fit the graphic
+and play quietly under Up Next narration. See the
+[Getting Started guide](docs/GETTING_STARTED.md#optional-background-music) for
+the folder examples and Weather soundtrack paths.
+
+Weather music uses a separate library under
+`RetroWeather/retroweather-media/music/`: condition-specific folders such as
+`conditions/rainy/` take precedence over `default/`, with silence as the final
+fallback. The RetroWeather dashboard opens this media folder.
 
 Configured daypart branding overrides use the same fallback rules before the
 ordinary channel folders. The shipped Nickelodeon `night` override creates
