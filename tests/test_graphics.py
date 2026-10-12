@@ -355,3 +355,18 @@ class GraphicsTests(unittest.TestCase):
             ).name,
             "root.mp3",
         )
+
+    def test_music_classification_accepts_direct_and_music_subfolders(self):
+        graphics = self.media / "nickelodeon" / "graphics"
+        cases = (
+            (graphics / "music" / "track.mp3", (None, None, None)),
+            (graphics / "up-next" / "track.mp3", ("up-next", None, None)),
+            (graphics / "up-next" / "music" / "track.mp3", ("up-next", None, None)),
+            (graphics / "night" / "up-next" / "music" / "track.mp3",
+             ("up-next", None, "night")),
+            (graphics / "holidays" / "halloween" / "up-next" / "music" / "track.mp3",
+             ("up-next", "halloween", None)),
+        )
+        for path, expected in cases:
+            with self.subTest(path=path):
+                self.assertEqual(GraphicsService._classify_audio(graphics, path), expected)

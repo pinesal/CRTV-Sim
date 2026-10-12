@@ -1014,10 +1014,11 @@ generated-file cleanup. The Settings startup-channel selector also includes the
 CRTV Sim Guide.
 
 Optional graphic music uses MP3, WAV, M4A, AAC, FLAC, Ogg, or Opus files placed
-inside a channel's graphics folders. For example,
-`<channel>/graphics/music/` is the general soundtrack, while
-`<channel>/graphics/up-next/music/` and
-`<channel>/graphics/interstitials/music/` are purpose-specific. Daypart,
+in a channel's graphics scopes. Put tracks directly in a scope folder or in
+its optional `music` subfolder: for example, both
+`<channel>/graphics/up-next/track.mp3` and
+`<channel>/graphics/up-next/music/track.mp3` are Up Next music, while
+`<channel>/graphics/music/track.mp3` is the channel-wide soundtrack. Daypart,
 holiday, and weekly-special folders can narrow the scope further. The most
 specific matching folder takes precedence; when it has no valid track, CRTV Sim
 falls back to the next broader applicable scope. Tracks loop to fit the graphic
@@ -1029,6 +1030,9 @@ Weather music uses a separate library under
 `RetroWeather/retroweather-media/music/`: condition-specific folders such as
 `conditions/rainy/` take precedence over `default/`, with silence as the final
 fallback. The RetroWeather dashboard opens this media folder.
+An optional `CRTV-Sim-Optional-Music-Pack.zip` provides sample Guide and Weather
+soundtracks and a general soundtrack in the channel template; it can be
+installed by merging its folders into the app and configured Media roots.
 
 Configured daypart branding overrides use the same fallback rules before the
 ordinary channel folders. The shipped Nickelodeon `night` override creates

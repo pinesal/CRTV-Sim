@@ -905,6 +905,10 @@ class GraphicsService:
         root: Path, path: Path
     ) -> tuple[str | None, str | None, str | None] | None:
         parts = [part.casefold() for part in path.relative_to(root).parts[:-1]]
+        # Accept both the compact legacy layout (tracks directly in a scope
+        # folder) and an explicit music subfolder beneath that scope.
+        if parts and parts[-1] == "music":
+            parts = parts[:-1]
         if not parts:
             return None, None, None
         if len(parts) == 1 and parts[0] in PURPOSES:

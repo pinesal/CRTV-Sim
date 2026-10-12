@@ -75,8 +75,9 @@ Music is separate from program audio, commercials, and bumpers. Supported
 formats are MP3, WAV, M4A, AAC, FLAC, Ogg, and Opus. CRTV Sim loops the selected
 track to fit the screen and keeps it quiet under Up Next narration.
 
-For a channel's Up Next screens and station interstitials, drop music into that
-channel's `graphics` folders. For example:
+For a channel's Up Next screens and station interstitials, put music in the
+matching graphics scope. You can put tracks directly in the scope folder or in
+an optional `music` subfolder; both layouts work. For example:
 
 ```text
 Nickelodeon/graphics/music/                         applies to all graphics
@@ -113,6 +114,12 @@ RetroWeather/retroweather-media/music/conditions/foggy/
 Weather uses a matching condition folder when it has a valid track, then falls
 back to `music/default`; if neither has music, it uses silence. You can open the
 Weather media folder from the RetroWeather dashboard and add tracks there.
+
+The optional `CRTV-Sim-Optional-Music-Pack.zip` adds a default soundtrack for
+the Guide and Weather channels, plus a general soundtrack in the channel
+template. Extract it over the CRTV Sim installation folder and merge folders.
+If your Media root is on another drive, copy the pack's `Media` contents into
+that configured root. The pack includes a credits file with the music sources.
 
 ## How commercials, bumpers, and interstitials work
 
