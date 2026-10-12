@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from retrotv.processing import PRESETS
+from retrotv.media_folders import ensure_library_scaffold
 
 
 def existing_profile(root: Path) -> bool:
@@ -107,8 +108,11 @@ class SetupService:
                 "synthetic_channels": {"weather": {"enabled": values.get("weather", False)}},
                 "web": {"host": "127.0.0.1"},
             }
-            # Saving settings is the commit point. No source/media mutation or
-            # processing starts here. A restart after interruption uses them.
+            # Setup creates only empty drag-and-drop directories. It does not
+            # scan, classify, or modify any files in the selected library.
+            ensure_library_scaffold(Path(values["media"]))
+            # Saving settings is the commit point. A restart after interruption
+            # uses them, and no media processing starts during setup.
             atomic_json(settings, overrides)
             atomic_json(self.root / "user-data/state/setup-completed.json", {"schema_version": 1})
             self.completed = True

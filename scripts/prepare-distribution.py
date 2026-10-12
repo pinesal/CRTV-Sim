@@ -16,6 +16,8 @@ import zipfile
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT / 'src'))
+from retrotv.media_folders import ensure_channel_scaffold
 SCOPES = ('morning', 'afternoon', 'evening', 'night', 'over-night', 'daytime', 'all-day')
 TYPES = ('episodes', 'shorts', 'movies', 'blocks', 'commercials', 'bumpers', 'promos', 'filler', 'station-ids')
 HOLIDAYS = ('halloween', 'christmas')
@@ -32,27 +34,8 @@ def sha256_file(path):
 
 
 def scaffold(root):
-    for channel in ('shared', '_channel_template'):
-        base = root / channel
-        regular_types = TYPES if channel != 'shared' else ('episodes', 'commercials', 'bumpers', 'promos', 'filler')
-        holiday_types = TYPES if channel != 'shared' else tuple(value for value in TYPES if value != 'blocks')
-        for scope in SCOPES:
-            for category in regular_types:
-                (base / scope / category).mkdir(parents=True, exist_ok=True)
-            for purpose in ('up-next', 'interstitials'):
-                (base / 'graphics' / scope / purpose).mkdir(parents=True, exist_ok=True)
-                for holiday in HOLIDAYS:
-                    (base / 'graphics' / scope / 'holidays' / holiday / purpose).mkdir(parents=True, exist_ok=True)
-        for holiday in HOLIDAYS:
-            for scope in SCOPES:
-                for category in holiday_types:
-                    (base / 'specials/holidays' / holiday / scope / category).mkdir(parents=True, exist_ok=True)
-            (base / 'specials/holidays' / holiday / 'specials/weekly').mkdir(parents=True, exist_ok=True)
-            for purpose in ('up-next', 'interstitials'):
-                (base / 'graphics/holidays' / holiday / purpose).mkdir(parents=True, exist_ok=True)
-        (base / 'specials/weekly').mkdir(parents=True, exist_ok=True)
-        for purpose in ('up-next', 'interstitials'):
-            (base / 'graphics' / purpose).mkdir(parents=True, exist_ok=True)
+    ensure_channel_scaffold(root / 'shared', dayparts=SCOPES[:5], holidays=HOLIDAYS, shared=True)
+    ensure_channel_scaffold(root / '_channel_template', dayparts=SCOPES[:5], holidays=HOLIDAYS)
 
 
 def prepare(output):

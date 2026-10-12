@@ -54,6 +54,11 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(original.read_bytes(), b'original')
         self.assertFalse((self.root/'db').exists())
         self.assertTrue(existing_profile(self.root))
+        self.assertTrue((self.media/'shared/all-day/commercials').is_dir())
+        self.assertTrue((self.media/'_channel_template/morning/episodes').is_dir())
+        self.assertTrue((self.media/'_channel_template/over-night/station-ids').is_dir())
+        self.assertTrue((self.media/'_channel_template/graphics/night/up-next/music').is_dir())
+        self.assertTrue((self.media/'_channel_template/specials/holidays/halloween/night/movies').is_dir())
 
     def test_unavailable_library_does_not_commit(self):
         with self.assertRaisesRegex(ValueError, 'accessible'):

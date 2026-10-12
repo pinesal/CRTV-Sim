@@ -10,6 +10,8 @@ from uuid import uuid4
 from retrotv.asset_paths import contained_path
 from retrotv.classification import _expanded_dayparts, slugify
 from retrotv.db import utc_now
+from retrotv.classification import resolve_channel_root
+from retrotv.media_folders import ensure_library_scaffold
 from retrotv.probe import fingerprint_file
 from retrotv.scanner import LibraryScanner, FFmpegInspector
 
@@ -107,6 +109,7 @@ class ExternalMediaService:
         assignments = payload.get('assignments')
         try:
             new_channel = str(payload.get('new_channel') or '').strip()
+            new_channel_slug = None
             if new_channel:
                 channel = slugify(new_channel)
                 if self.connection.execute('SELECT 1 FROM channels WHERE slug=?', (channel,)).fetchone():
@@ -127,6 +130,7 @@ class ExternalMediaService:
                 # Use the existing channel representation, without its Internet Media workflow.
                 self.connection.execute('INSERT INTO channels(slug,display_name,channel_number,enabled) VALUES (?,?,?,1)', (channel,new_channel,number))
                 assignments = [{'channel': channel, 'scope': str(payload.get('scope') or 'all-day')}]
+                new_channel_slug = channel
             if existing is None:
                 cursor = self.connection.execute(
                     "INSERT INTO storage_roots(logical_name,source_kind,absolute_path) VALUES (?,'external',?)",
@@ -139,6 +143,18 @@ class ExternalMediaService:
             self.connection.execute('UPDATE external_sources SET series_title=?,scan_status=\'pending\' WHERE root_id=?', (title,existing))
             self.connection.execute('UPDATE assets SET series_title=? WHERE source_root_id=?', (title,existing))
             self._eligibility(existing)
+            if new_channel_slug:
+                media_root = self.config.storage_root('media').resolve()
+                channel_root = resolve_channel_root(media_root, new_channel_slug)
+                dayparts = self.dayparts
+                holidays = set(self.config.data.get('seasonal', {}).get('holidays', {}).keys())
+                holidays.update(self.config.data.get('graphics', {}).get('holidays', []))
+                ensure_library_scaffold(
+                    media_root,
+                    channels=[channel_root],
+                    dayparts=dayparts,
+                    holidays=holidays,
+                )
             self.connection.commit()
         except Exception:
             self.connection.rollback()

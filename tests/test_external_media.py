@@ -152,6 +152,12 @@ class ExternalMediaTests(unittest.TestCase):
 
     def test_external_only_channel_survives_scan(self):
         result=self.service.register({'path':str(self.series),'series_title':'Doug','new_channel':'External TV','scope':'all-day'})
+        channel_root=self.media/'external-tv'
+        self.assertTrue((channel_root/'morning/episodes').is_dir())
+        self.assertTrue((channel_root/'over-night/blocks').is_dir())
+        self.assertTrue((channel_root/'all-day/station-ids').is_dir())
+        self.assertTrue((channel_root/'specials/holidays/halloween/night/episodes').is_dir())
+        self.assertTrue((channel_root/'graphics/night/up-next/music').is_dir())
         self.service.scan(result['root_id'])
         LibraryScanner(self.db,self.config,inspector=Inspector()).scan()
         self.assertEqual(self.db.execute("SELECT enabled FROM channels WHERE slug='external-tv'").fetchone()[0],1)
