@@ -173,6 +173,32 @@ class ExternalMediaTests(unittest.TestCase):
         self.service.update(self.source,{'enabled':False})
         require_scheduled_channel(self.db,'nickelodeon')
 
+    def test_weather_is_not_an_external_programming_destination(self):
+        ScheduleBuilder(self.db,self.config).ensure_channel('weather')
+        self.assertNotIn('weather', {row['slug'] for row in self.service.overview()['channels']})
+        with self.assertRaisesRegex(ValueError, 'Weather is a synthetic channel'):
+            self.service.register({
+                'path':str(self.series),'series_title':'Doug',
+                'assignments':[{'channel':'weather','scope':'all-day'}],
+            })
+        with self.assertRaisesRegex(ValueError, 'Weather is a synthetic channel'):
+            self.service.register({
+                'path':str(self.series),'series_title':'Doug',
+                'new_channel':'Weather','scope':'all-day',
+            })
+
+    def test_stale_weather_external_assignment_is_not_scheduled(self):
+        root_id=self.add('all-day')
+        ScheduleBuilder(self.db,self.config).ensure_channel('weather')
+        self.db.execute(
+            "INSERT INTO external_assignments(root_id,channel_slug,scope) VALUES (?, 'weather', 'all-day')",
+            (root_id,),
+        )
+        self.db.commit()
+        self.service._eligibility(root_id)
+        self.db.commit()
+        self.assertEqual(ScheduleBuilder(self.db,self.config)._candidates('weather','morning',{'episode'}), [])
+
     def test_cancel_and_partial_scan_do_not_remove_assets(self):
         self.add()
         event=Event();event.set()

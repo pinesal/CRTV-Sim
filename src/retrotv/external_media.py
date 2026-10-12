@@ -14,6 +14,7 @@ from retrotv.classification import resolve_channel_root
 from retrotv.media_folders import ensure_library_scaffold
 from retrotv.probe import fingerprint_file
 from retrotv.scanner import LibraryScanner, FFmpegInspector
+from retrotv.synthetic import weather_channel_definition
 
 
 def _directory_alias(path):
@@ -79,9 +80,12 @@ class ExternalMediaService:
         if not isinstance(assignments, list) or not assignments:
             raise ValueError('Choose at least one scheduled channel and daypart')
         validated = set()
+        weather_slug = weather_channel_definition(self.config).slug
         for item in assignments:
             channel = slugify(str(item.get('channel') or ''))
             scope = str(item.get('scope') or '')
+            if channel == weather_slug:
+                raise ValueError('Weather is a synthetic channel and cannot receive scheduled programming')
             row = self.connection.execute(
                 "SELECT c.id,p.playback_mode FROM channels c LEFT JOIN channel_playback_preferences p ON p.channel_id=c.id WHERE c.slug=?",
                 (channel,),
@@ -112,6 +116,8 @@ class ExternalMediaService:
             new_channel_slug = None
             if new_channel:
                 channel = slugify(new_channel)
+                if channel == weather_channel_definition(self.config).slug:
+                    raise ValueError('Weather is a synthetic channel and cannot be created as a programming channel')
                 if self.connection.execute('SELECT 1 FROM channels WHERE slug=?', (channel,)).fetchone():
                     raise ValueError('That channel already exists; select it instead')
                 number = payload.get('channel_number')
@@ -198,12 +204,15 @@ class ExternalMediaService:
 
     def overview(self):
         result = []
+        weather_slug = weather_channel_definition(self.config).slug
         for row in self.connection.execute('SELECT r.*,s.* FROM storage_roots r JOIN external_sources s ON s.root_id=r.id ORDER BY s.series_title').fetchall():
             item = dict(row)
-            item['assignments'] = [dict(a) for a in self.connection.execute('SELECT * FROM external_assignments WHERE root_id=? AND enabled=1', (row['id'],))]
+            assignments = [dict(a) for a in self.connection.execute('SELECT * FROM external_assignments WHERE root_id=? AND enabled=1', (row['id'],))]
+            item['unsupported_assignments'] = [a for a in assignments if a['channel_slug'] == weather_slug]
+            item['assignments'] = [a for a in assignments if a['channel_slug'] != weather_slug]
             item['episode_count'] = self.connection.execute("SELECT COUNT(*) FROM assets WHERE source_root_id=? AND integrity_status!='missing'", (row['id'],)).fetchone()[0]
             result.append(item)
-        channels = [dict(r) for r in self.connection.execute("SELECT c.slug,c.display_name,c.channel_number FROM channels c LEFT JOIN channel_playback_preferences p ON p.channel_id=c.id WHERE COALESCE(p.playback_mode,'scheduled')='scheduled' ORDER BY c.channel_number")]
+        channels = [dict(r) for r in self.connection.execute("SELECT c.slug,c.display_name,c.channel_number FROM channels c LEFT JOIN channel_playback_preferences p ON p.channel_id=c.id WHERE COALESCE(p.playback_mode,'scheduled')='scheduled' AND c.slug<>? ORDER BY c.channel_number", (weather_slug,))]
         interval = self.config.data.get('external_media', {}).get(
             'rescan_interval_hours', 168
         )

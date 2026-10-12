@@ -1484,6 +1484,7 @@ INDEX_HTML = """<!doctype html>
           const info=document.createElement("p"); info.textContent=`${source.enabled ? "Enabled" : "Disconnected"} · ${source.availability} · ${source.episode_count} episodes · scan ${source.scan_status} (${source.processed_count} processed) · last scan ${source.last_scan_at || "not yet"} · periodic rescan every ${externalData.rescan_interval_hours} hours`;
           const placements=document.createElement("p"); placements.textContent=source.assignments.map(a=>`${a.channel_slug} / ${a.scope}`).join("; ") || "No assignments";
           card.append(title,path,placements,info);
+          if(source.unsupported_assignments?.length){const warning=document.createElement("p");warning.textContent="Weather is a synthetic channel and cannot receive programming. Add a scheduled-channel assignment to this source.";warning.className="warn";card.append(warning);}
           if(source.scan_error){const error=document.createElement("p");error.textContent=source.scan_error;error.className="bad";card.append(error);}
           const actions=document.createElement("div"); actions.className="toolbar";
           function button(label,action){const b=document.createElement("button");b.textContent=label;b.onclick=async()=>{b.disabled=true;try{const result=await action();await loadExternalSources();$("external-message").textContent=result?.message||"Saved. Affected schedule updates use the maintenance pipeline.";}catch(e){$("external-message").textContent=e.message;}finally{b.disabled=false;}};actions.append(b);return b;}

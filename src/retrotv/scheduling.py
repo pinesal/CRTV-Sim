@@ -60,6 +60,7 @@ WITH placements AS (
     JOIN external_assignments x ON x.root_id=r.id AND x.enabled=1
     JOIN asset_eligibility e ON e.asset_id=a.id AND e.eligibility_source='external:' || x.id AND e.enabled=1
     WHERE r.source_kind='external' AND r.enabled=1 AND es.availability='available'
+      AND x.channel_slug <> 'weather'
       AND a.review_status='ready' AND a.enabled_for_scheduling=1
       AND a.integrity_status IN ('ready','not_scanned')
 )
