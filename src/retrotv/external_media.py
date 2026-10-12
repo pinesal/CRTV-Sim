@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import stat as file_stat
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -187,10 +188,54 @@ class ExternalMediaService:
             item['episode_count'] = self.connection.execute("SELECT COUNT(*) FROM assets WHERE source_root_id=? AND integrity_status!='missing'", (row['id'],)).fetchone()[0]
             result.append(item)
         channels = [dict(r) for r in self.connection.execute("SELECT c.slug,c.display_name,c.channel_number FROM channels c LEFT JOIN channel_playback_preferences p ON p.channel_id=c.id WHERE COALESCE(p.playback_mode,'scheduled')='scheduled' ORDER BY c.channel_number")]
-        return {'sources':result, 'channels':channels, 'dayparts':sorted(self.dayparts)}
+        interval = self.config.data.get('external_media', {}).get(
+            'rescan_interval_hours', 168
+        )
+        try:
+            interval = max(1, int(interval))
+        except (TypeError, ValueError):
+            interval = 168
+        return {
+            'sources':result,
+            'channels':channels,
+            'dayparts':sorted(self.dayparts),
+            'rescan_interval_hours':interval,
+        }
 
-    def scan_all(self, *, cancel_event=None):
-        return [self.scan(r[0], cancel_event=cancel_event) for r in self.connection.execute("SELECT id FROM storage_roots WHERE source_kind='external' AND enabled=1").fetchall() if not (cancel_event and cancel_event.is_set())]
+    def scan_due(self, *, cancel_event=None, interval_hours=None):
+        """Scan explicitly pending sources and sources past the periodic interval."""
+        if interval_hours is None:
+            interval_hours = self.config.data.get('external_media', {}).get(
+                'rescan_interval_hours', 168
+            )
+        try:
+            interval = timedelta(hours=max(1, int(interval_hours)))
+        except (TypeError, ValueError):
+            interval = timedelta(hours=168)
+        now = datetime.now(timezone.utc)
+        due = []
+        for row in self.connection.execute(
+            "SELECT r.id,s.scan_status,s.last_scan_at FROM storage_roots r "
+            "JOIN external_sources s ON s.root_id=r.id "
+            "WHERE r.source_kind='external' AND r.enabled=1 ORDER BY r.id"
+        ).fetchall():
+            if row['scan_status'] in {'pending', 'running'} or not row['last_scan_at']:
+                due.append(int(row['id']))
+                continue
+            try:
+                last_scan = datetime.fromisoformat(row['last_scan_at'])
+                if last_scan.tzinfo is None:
+                    last_scan = last_scan.replace(tzinfo=timezone.utc)
+                if now - last_scan.astimezone(timezone.utc) >= interval:
+                    due.append(int(row['id']))
+            except (TypeError, ValueError):
+                # An unusable timestamp should recover through a fresh scan.
+                due.append(int(row['id']))
+        return [
+            self.scan(root_id, cancel_event=cancel_event)
+            for root_id in due
+            if not (cancel_event and cancel_event.is_set())
+        ]
 
     def scan(self, root_id, *, cancel_event=None):
         source = self._source(root_id)

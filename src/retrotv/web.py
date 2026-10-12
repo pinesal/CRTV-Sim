@@ -1481,12 +1481,12 @@ INDEX_HTML = """<!doctype html>
           const card=document.createElement("section"); card.className="panel";
           const title=document.createElement("h3"); title.textContent=`${source.series_title} · External / read-only`;
           const path=document.createElement("p"); path.textContent=source.absolute_path; path.className="path";
-          const info=document.createElement("p"); info.textContent=`${source.enabled ? "Enabled" : "Disconnected"} · ${source.availability} · ${source.episode_count} episodes · scan ${source.scan_status} (${source.processed_count} processed) · last scan ${source.last_scan_at || "not yet"}`;
+          const info=document.createElement("p"); info.textContent=`${source.enabled ? "Enabled" : "Disconnected"} · ${source.availability} · ${source.episode_count} episodes · scan ${source.scan_status} (${source.processed_count} processed) · last scan ${source.last_scan_at || "not yet"} · periodic rescan every ${externalData.rescan_interval_hours} hours`;
           const placements=document.createElement("p"); placements.textContent=source.assignments.map(a=>`${a.channel_slug} / ${a.scope}`).join("; ") || "No assignments";
           card.append(title,path,placements,info);
           if(source.scan_error){const error=document.createElement("p");error.textContent=source.scan_error;error.className="bad";card.append(error);}
           const actions=document.createElement("div"); actions.className="toolbar";
-          function button(label,action){const b=document.createElement("button");b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await action();await loadExternalSources();$("external-message").textContent="Saved. Scanning and affected schedule updates use the maintenance pipeline.";}catch(e){$("external-message").textContent=e.message;}finally{b.disabled=false;}};actions.append(b);return b;}
+          function button(label,action){const b=document.createElement("button");b.textContent=label;b.onclick=async()=>{b.disabled=true;try{const result=await action();await loadExternalSources();$("external-message").textContent=result?.message||"Saved. Affected schedule updates use the maintenance pipeline.";}catch(e){$("external-message").textContent=e.message;}finally{b.disabled=false;}};actions.append(b);return b;}
           const rescan=button("Rescan",()=>externalPost(`/api/external-media/${source.id}/rescan`,{})); rescan.disabled=!source.enabled;
           const editor=document.createElement("div"); editor.hidden=true;
           const edit=document.createElement("button"); edit.textContent="Edit title & assignments";
@@ -1507,7 +1507,7 @@ INDEX_HTML = """<!doctype html>
     }
     $("external-add").onclick=async()=>{
       const button=$("external-add");button.disabled=true;
-      try{await externalPost("/api/external-media",{path:$("external-path").value,series_title:$("external-title").value,new_channel:$("external-new-channel").value,channel_number:$("external-number").value,scope:$("external-scope").value,assignments:[{channel:$("external-channel").value,scope:$("external-scope").value}]});$("external-message").textContent="Source registered. Scan queued through maintenance; refresh sources to see progress.";await loadExternalSources();}
+      try{const result=await externalPost("/api/external-media",{path:$("external-path").value,series_title:$("external-title").value,new_channel:$("external-new-channel").value,channel_number:$("external-number").value,scope:$("external-scope").value,assignments:[{channel:$("external-channel").value,scope:$("external-scope").value}]});$("external-message").textContent=result.message||"Source registered. Scan queued through maintenance; refresh sources to see progress.";await loadExternalSources();}
       catch(e){$("external-message").textContent=e.message;}finally{button.disabled=false;}
     };
     $("external-refresh").onclick=loadExternalSources;
@@ -5314,8 +5314,14 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                             if parsed.path == '/api/external-media' or parsed.path.endswith('/rescan'):
                                 result['scan'] = service.scan(result['root_id'])
                     if runtime is not None:
-                        result['queued'] = True
-                        runtime.request_maintenance()
+                        started = runtime.request_maintenance()
+                        result['queued'] = bool(started)
+                        result['maintenance_started'] = bool(started)
+                        result['message'] = (
+                            "Scan queued and maintenance started; refresh sources to see progress."
+                            if started else
+                            "The source request is saved, but maintenance did not start. It will run on the next maintenance pass; retry after shutdown is complete if needed."
+                        )
                     self._json(result, 202 if runtime is not None else 200)
                 except (ValueError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:
                     self._json({'error': str(exc)},400)

@@ -47,8 +47,10 @@ Schedules**, expand **External Media Sources**, and:
    and its season subfolders, then updates affected unlocked schedules. Refresh
    sources to see availability, scan progress and errors.
 4. Use **Edit title & assignments** to add other channels/dayparts. Use **Rescan**
-   after adding or moving episodes. Ordinary maintenance also rescans enabled
-   sources.
+after adding or moving episodes. Maintenance scans requested sources and
+periodically checks enabled sources (weekly by default); it does not rescan every
+external library on every maintenance pass. Adjust
+`[external_media].rescan_interval_hours` in the profile configuration if needed.
 
 `daytime` covers morning, afternoon and evening; `all-day` covers all configured
 dayparts. Recurring channels retain the same scope and scarcity rules as managed

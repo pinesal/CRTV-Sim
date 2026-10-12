@@ -951,7 +951,16 @@ class ApplicationRuntime:
 
     def request_normalization_review(self, asset_id: int) -> bool:
         from retrotv.processing import require_enabled
+        from retrotv.asset_paths import is_external
         require_enabled(self.config, "normalization")
+        # Check ownership before stopping playback. The service checks again at
+        # the modification boundary, but rejected requests should be harmless.
+        connection = connect_database(self.config.database_path)
+        try:
+            if is_external(connection, asset_id):
+                raise ValueError("External media is read-only; normalization re-review is unavailable")
+        finally:
+            connection.close()
         with self.lock:
             if self.stop_event.is_set():
                 raise ValueError("CRTV Sim is shutting down")
@@ -2171,7 +2180,12 @@ class ApplicationRuntime:
             class ScanCancellation:
                 def is_set(inner):
                     return self._maintenance_should_stop()
-            external_scans = ExternalMediaService(connection, self.config).scan_all(cancel_event=ScanCancellation())
+            interval = self.config.data.get('external_media', {}).get(
+                'rescan_interval_hours', 168
+            )
+            external_scans = ExternalMediaService(connection, self.config).scan_due(
+                cancel_event=ScanCancellation(), interval_hours=interval
+            )
             with self.lock:
                 self.maintenance['external_scans'] = external_scans
                 self.maintenance["scan"] = {

@@ -40,12 +40,15 @@ Escaping file aliases are reported rather than indexed.
 
 ## Scanning and outages
 
-Explicit scans use the normal maintenance pipeline; enabled sources are also
-rescanned during ordinary readiness. Probing and lightweight size/head/tail
-fingerprints do not require hashing every byte of the library. Unchanged files
-retain IDs. A unique matching fingerprint/size with an absent original path can
-retain an ID after a move within the registered root. Ambiguous matches retain
-the missing record and create a new asset rather than guessing.
+An explicit scan marks only that source pending. The next maintenance pass scans
+pending sources; maintenance does not rescan every source on every run. By
+default, ordinary readiness rescans enabled sources every 168 hours. Configure
+`[external_media].rescan_interval_hours` in the profile configuration to change
+that interval. Probing and lightweight size/head/tail fingerprints do not require
+hashing every byte of the library. Unchanged files retain IDs. A unique matching
+fingerprint/size with an absent original path can retain an ID after a move within
+the registered root. Ambiguous matches retain the missing record and create a new
+asset rather than guessing.
 
 Unavailable roots retain their catalog and assignments but are excluded from
 new candidate selection until access returns. Cancelled, failed or partial scans

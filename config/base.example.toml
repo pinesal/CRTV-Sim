@@ -18,6 +18,11 @@ request_timeout_seconds = 30
 probe_timeout_seconds = 60
 decode_timeout_seconds = 60
 
+[external_media]
+# Explicit requests are scanned on the next maintenance pass. Sources are
+# otherwise revisited weekly while maintenance is running.
+rescan_interval_hours = 168
+
 [tools]
 ffmpeg = "ffmpeg"
 ffprobe = "ffprobe"
