@@ -11,12 +11,6 @@ aspect analysis, corrected-media replacement with verified backups, persistent
 date-aware schedules, complete blocks, join-in-progress playback, a rendered TV
 Guide channel, and a unified Windows application dashboard with automation.
 
-## Development
-
-CRTV Sim is developed by its maintainer with assistance from OpenAI Codex, an
-AI coding tool. The project direction, requirements, and release decisions are
-human-led.
-
 ## Why CRTV Sim?
 
 CRTV Sim builds always-on TV channels directly from your video files. It does
@@ -1442,3 +1436,9 @@ before publishing the ZIP.
 CRTV Sim's original source code and documentation are licensed under the MIT
 License. Bundled third-party tools and assets retain their own licenses and
 notices; see [docs/THIRD-PARTY.md](docs/THIRD-PARTY.md).
+
+## Development
+
+CRTV Sim is developed by its maintainer with assistance from OpenAI Codex, an
+AI coding tool. The project direction, requirements, and release decisions are
+human-led.
