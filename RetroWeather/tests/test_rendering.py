@@ -281,11 +281,35 @@ class StaticRenderingTests(WorkspaceTestCase):
 
         command = commands[0]
         graph = (self.temporary / "segment-22.filter").read_text(encoding="utf-8")
-        self.assertIn("-filter_complex_script", command)
+        self.assertEqual(
+            command[command.index("-/filter_complex") + 1],
+            str(self.temporary / "segment-22.filter"),
+        )
         self.assertIn(str(screen.holiday_overlay), command)
         self.assertEqual(command[command.index("-map") + 1], "[vout]")
         self.assertLess(graph.index("[weather][holiday]overlay"), graph.index("drawbox="))
         self.assertLess(graph.index("drawbox="), graph.index("drawtext="))
+
+    def test_plain_screen_loads_filter_file_with_current_ffmpeg_syntax(self) -> None:
+        plan = build_forecast_plan(self.snapshot, DEFAULT_SETTINGS)
+        screen = build_screens(self.snapshot, plan)[1]
+        commands: list[list[str]] = []
+
+        def runner(command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        _render_segment(
+            self.temporary / "plain.mp4", plan.segments[1], screen,
+            self.temporary, 23, runner,
+        )
+
+        command = commands[0]
+        graph_path = self.temporary / "segment-23.filter"
+        self.assertEqual(command[command.index("-/filter:v") + 1], str(graph_path))
+        self.assertIn("drawtext=", graph_path.read_text(encoding="utf-8"))
+        self.assertEqual(command[command.index("-map") + 1], "0:v:0")
+        self.assertIn("1:a:0", command)
 
     def test_long_text_shrinks_then_ellipsizes_inside_safe_width(self) -> None:
         text, size = fit_text(

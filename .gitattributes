@@ -1,0 +1,4 @@
+# These are byte-checked provenance inputs. Preserve their original line endings.
+assets/public-notices/Microsoft-* -text whitespace=-blank-at-eol,cr-at-eol
+assets/public-notices/ffmpeg-COPYING.* -text
+packaging/*.lock.json -text whitespace=cr-at-eol

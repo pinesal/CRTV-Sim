@@ -1,27 +1,57 @@
 # Bundled software release checklist
 
-CRTV Sim ships FFmpeg, ffprobe, and mpv in the Windows portable package. These are separate third-party programs with their own licenses. CRTV Sim's MIT license does not cover them.
+CRTV Sim remains MIT; bundled software retains separate terms. This checklist
+is an engineering release record, not legal certification. See THIRD-PARTY.md
+for the evidence and component license boundaries.
 
-## Before publishing a portable package
+## Build and validate
 
-- Confirm the exact executable and DLL hashes in `BUILD-INVENTORY.json` match the release candidate.
-- Include each upstream copyright notice, license text, and build configuration in `licenses/`.
-- Include the exact corresponding source for each binary and every statically linked library, plus the scripts and configuration needed to rebuild it. A source repository link, version list, or configure line alone is not the complete source package.
-- Verify that the source revisions correspond to the packaged binaries. Record source archive hashes and build instructions in the release source archive.
-- Check upstream license obligations and codec patent rules for the intended distribution regions. Ask a qualified lawyer if a legal conclusion is needed.
-- Publish the binary ZIP and corresponding source ZIP together. Keep the exact source archive available for the full period required by the applicable licenses.
-- Test the portable ZIP on a clean Windows account and verify its SHA-256 checksum.
+1. Use the reviewed `packaging/windows-media.lock.json`,
+   `packaging/microsoft-runtime.lock.json`, a licensed Visual Studio installation,
+   pinned Python runtime
+   and `requirements.lock` / `requirements-build.lock`. Never source public media
+   executables from PATH. PyInstaller's DLL search must be isolated too.
+2. Run `.\scripts\build-portable-windows.ps1` from the project root. The default
+   public workflow must stop on a missing package, hash mismatch, recipe mismatch,
+   unresolved corresponding-source input, native-library origin or missing notice.
+   `-SkipArchive` does not bypass public evidence checks.
+3. Check every bundled executable/DLL and Python extension in the manifests.
+   Confirm source package hashes, `.BUILDINFO` recipe correspondence, dependency
+   closure, source checksums, Git pins and actual license texts. Account for
+   static/header, generated, runtime-loaded and fetched inputs, not just PE imports.
+4. Confirm no `--enable-nonfree` configuration, no private user-data/media/keys,
+   no unapproved output files, and no silently missing notices. Refuse to build
+   over a directory containing user-data.
+5. Run `python scripts/check-media-tools.py <candidate>` for real codecs, filters,
+   render operations, Windows named-pipe IPC and seeking. Run the unittest suite.
+6. Run `python scripts/smoke-distribution.py --archive <Windows.zip> --root
+   .test-tmp/<new-isolated-name>` to extract and launch the real archive through
+   setup, Dashboard, restart and safe shutdown. Use a clean Windows account/
+   machine separately to check optional renderers/plugins and installed-tool
+   independence. Automated static checks do not prove legal compliance.
 
-## Current status
+## Publish only after the evidence is complete
 
-The packaging script is set up to copy FFmpeg's upstream build README and license, mpv's copyright and GPL notice, and the Vulkan loader license into future packages. It records hashes for bundled executables and DLLs. `THIRD-PARTY.md` identifies the known upstream revisions and build details. The exact currently published candidate has not been rebuilt with these packaging changes.
+- Require zero problems in THIRD-PARTY-MANIFEST.json and the source manifest.
+  Retain full Rust vendor inputs, incorporated-source coverage, original notices
+  and Microsoft grant evidence; never waive missing materials with a flag.
+- Upload the Windows ZIP, same-version ThirdParty-Sources and
+  ThirdParty-Build-Inputs ZIPs and SHA256SUMS
+  together. Put a source link next to the binary link in release notes and any
+  download page. Preserve source availability under the applicable license terms.
+- Keep complete upstream licenses, notices, recipes, patches and source-to-binary
+  mapping; document modifications (none to these media executables by CRTV Sim).
+- Assess codec patents, libdvdcss/anti-circumvention and Microsoft redistribution
+  permissions for intended distribution regions. Obtain legal advice if needed.
+- Before making the repository public, address the old Windows assets in
+  v0.9.47-test.20261011 and v0.9.48-external-media-test; neither currently has a
+  matching source ZIP. Never remove/replace releases without owner authorization.
+- Review example-channel/media-pack rights separately. Signing and public hosting
+  are owner decisions; they do not repair a source gap.
 
-The matching source package is not complete yet. In particular, the current FFmpeg binary statically links many external libraries, and the exact resolved dependency revisions for the mpv CI binary have not been recovered. Do not publish the current portable ZIP as a public release until this source gap is closed or the bundled binaries are replaced with builds whose complete source inputs can be pinned and distributed.
+## Internal testing
 
-## Current binaries to resolve
-
-- FFmpeg and ffprobe: Gyan essentials build `2025-02-02-git-957eb2323a`, core commit `957eb2323a`; its build README is included in the package.
-- mpv: official Windows CI build from mpv commit `41f6a645068483470267271e1d09966ca3b9f413`; the executable reports embedded FFmpeg revision `f853d12`. The CI recipe at that commit uses some moving dependency references, so the recipe alone does not identify every exact source input used for this binary.
-- Vulkan loader: `vulkan-1.dll` is separately included and its license notice is bundled.
-
-This checklist is a release engineering record, not legal advice or a claim that all distribution obligations have been satisfied.
+`-InternalBuild` keeps development convenient, using the same pinned binaries.
+It adds INTERNAL to archive/checksum names and a visible warning in the package.
+It collects available source evidence without declaring it complete. It is not
+permission to distribute an incomplete copyleft bundle. No upload is automated.

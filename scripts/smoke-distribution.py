@@ -1,11 +1,15 @@
 """Exercise frozen first setup and legacy restart in an isolated local profile."""
 import json
+import argparse
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
+import sys
 import time
+import zipfile
 from urllib.request import Request, urlopen
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -31,22 +35,72 @@ def wait(path):
 
 def launch():
     env={**os.environ,'RETROTV_PORTABLE_ROOT':str(ROOT)}
-    return subprocess.Popen([str(BUILD/'CRTV-Sim.exe')],cwd=ROOT,env=env,creationflags=subprocess.CREATE_NO_WINDOW)
+    return subprocess.Popen([str(ROOT/'CRTV-Sim.exe')],cwd=ROOT,env=env,creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def stop(process):
+    if process.poll() is not None:
+        return
+    settings=json.loads(api('/api/settings'))
+    fields={field['path']:field['value'] for field in settings['fields']}
+    configured_media=Path(fields['storage_roots.media']).resolve()
+    if not configured_media.is_relative_to(ROOT):
+        raise RuntimeError('Refusing shutdown: this Dashboard is not the isolated smoke profile')
     result=json.loads(api('/api/runtime/shutdown',{},timeout=90))
     assert result['shutdown']['safe_to_remove'],result
     process.wait(timeout=30)
 
 
+def check_frozen_weather():
+    """Render with the packaged code and tools, using an offline test forecast."""
+    sys.path.insert(0, str(PROJECT / 'RetroWeather/src'))
+    from retroweather.config import AppPaths, initialize
+    paths = AppPaths.discover(ROOT / 'Weather test with spaces')
+    initialize(paths)
+    shutil.copy2(PROJECT / 'RetroWeather/tests/fixtures/normalized-weather.json', paths.latest_snapshot)
+    settings = json.loads(paths.settings.read_text(encoding='utf-8'))
+    settings['crtvsim_holidays'] = {'halloween': {'start': '01-01', 'end': '12-31'}}
+    paths.settings.write_text(json.dumps(settings), encoding='utf-8')
+    overlay = paths.media / 'graphics/holidays/halloween/overlays/test.png'
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, 'RETROTV_PORTABLE_ROOT': str(ROOT),
+           'PATH': str(Path(os.environ['SystemRoot']) / 'System32')}
+    subprocess.run([
+        str(ROOT / 'tools/ffmpeg/ffmpeg.exe'), '-hide_banner', '-loglevel', 'error',
+        '-y', '-f', 'lavfi', '-i', 'color=black@0.0:s=640x480,format=rgba,'
+        'drawbox=x=0:y=0:w=iw:h=ih:color=orange:t=8', '-frames:v', '1', str(overlay),
+    ], env=env, check=True, timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)
+    rendered = subprocess.run([
+        str(ROOT / 'CRTV-Sim.exe'), '--retroweather', '--home', str(paths.home), 'render',
+    ], cwd=ROOT, env=env, capture_output=True, timeout=300,
+       creationflags=subprocess.CREATE_NO_WINDOW)
+    assert rendered.returncode == 0, (rendered.returncode, rendered.stderr)
+    pointer = json.loads((paths.output / 'current.json').read_text())
+    version = paths.output / Path(pointer['manifest']).parent
+    manifest = json.loads((version / 'channel.json').read_text(encoding='utf-8'))
+    assert abs(manifest['duration_seconds'] - 120) <= 0.15, manifest
+    metadata = json.loads((version / 'render-metadata.json').read_text())
+    assert metadata['seasonal']['overlay'] == 'test.png', metadata
+    assert (version / 'weather-channel.mp4').is_file()
+    print('Frozen Weather rendered and published a complete two-minute holiday broadcast with bundled FFmpeg')
+
+
 def main():
+    with socket.socket() as connection:
+        connection.settimeout(1)
+        if connection.connect_ex(('127.0.0.1',8765))==0:
+            raise RuntimeError('Port 8765 is occupied; refusing to interact with an existing Dashboard')
     if ROOT.exists():
         raise RuntimeError('Remove the previous isolated smoke profile deliberately before rerunning')
     ROOT.mkdir(parents=True)
-    for name in ('portable-defaults','assets','migrations','tools'):
-        shutil.copytree(BUILD/name,ROOT/name,copy_function=os.link)
+    for name in ('portable-defaults','assets','migrations','tools','_internal'):
+        shutil.copytree(BUILD/name,ROOT/name)
+    shutil.copy2(BUILD/'CRTV-Sim.exe',ROOT/'CRTV-Sim.exe')
     shutil.copy2(BUILD/'pyproject.toml',ROOT/'pyproject.toml')
+    if (BUILD/'MICROSOFT-RUNTIME.json').is_file():
+        shutil.copy2(BUILD/'MICROSOFT-RUNTIME.json',ROOT/'MICROSOFT-RUNTIME.json')
+        shutil.copytree(BUILD/'licenses/microsoft',ROOT/'licenses/microsoft')
+    check_frozen_weather()
     # Keep the test short and avoid unnecessary act-break work on an empty library.
     base=ROOT/'portable-defaults/user-data/config/base.example.toml'
     # copytree hardlinked defaults: replace the inode before changing test values.
@@ -61,7 +115,7 @@ def main():
         assert not (ROOT/'user-data/database/retrotv.sqlite3').exists()
         values={'media':str(media),'timezone':'Europe/London','display':'modern',
                 'resolution':'1080p','aspect':'preserve','policy':'proxy',
-                'video':False,'audio':False,'tails':False,'weather':False}
+                'video':False,'audio':False,'tails':False,'weather':False,'runtime_terms':True}
         api('/api/setup/preview',values,token)
         assert not (ROOT/'user-data/database/retrotv.sqlite3').exists()
         api('/api/setup/complete',values,token)
@@ -71,7 +125,7 @@ def main():
         assert fields['normalization.enabled'] is False
         assert fields['audio_normalization.enabled'] is False
         assert fields['normalization.canvas_width']==1920
-        print('Frozen setup committed before scanning; Dashboard/settings available; version 0.9.48')
+        print('Frozen setup committed before scanning; Dashboard/settings available')
         stop(process)
         overlay=ROOT/'user-data/config/portable.windows.settings.json'
         payload=json.loads(overlay.read_text())
@@ -96,4 +150,28 @@ def main():
             except Exception: process.terminate(); process.wait(timeout=10)
 
 
-if __name__=='__main__': main()
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build',type=Path,default=BUILD)
+    parser.add_argument('--root',type=Path,default=ROOT)
+    parser.add_argument('--archive',type=Path,help='Extract and test the actual Windows ZIP')
+    args=parser.parse_args()
+    BUILD=args.build.resolve()
+    ROOT=args.root.resolve()
+    if not ROOT.is_relative_to((PROJECT/'.test-tmp').resolve()):
+        raise ValueError('Smoke profiles must remain inside project .test-tmp')
+    if args.archive:
+        extracted=ROOT.parent/(ROOT.name+' archive extraction')
+        if extracted.exists():
+            raise ValueError('Archive extraction destination already exists')
+        with zipfile.ZipFile(args.archive) as candidate:
+            for name in candidate.namelist():
+                path=Path(name)
+                if path.is_absolute() or '..' in path.parts or ':' in name or '\\' in name:
+                    raise ValueError('Unsafe archive member')
+            candidate.extractall(extracted)
+        builds=list(extracted.glob('*/CRTV-Sim.exe'))
+        if len(builds)!=1:
+            raise ValueError('Archive must contain exactly one portable application')
+        BUILD=builds[0].parent
+    main()

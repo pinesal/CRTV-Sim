@@ -1,8 +1,11 @@
 param(
     [string]$Python = '.venv\Scripts\python.exe',
-    [string]$Output = 'dist\CRTV-Sim-Portable-0.9.48',
+    [string]$Output = 'dist\release-candidate\CRTV-Sim-Portable-0.9.48',
     [string]$MediaRoot = '../Videos/media',
-    [switch]$SkipArchive
+    [switch]$SkipArchive,
+    [switch]$InternalBuild,
+    [switch]$SkipSmokeTests,
+    [string]$MediaCache = '.build\windows-media'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,7 +13,7 @@ $projectRoot = (Split-Path -Parent $PSScriptRoot)
 Set-Location -LiteralPath $projectRoot
 $outputRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $Output))
 $distRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'dist'))
-if (-not $outputRoot.StartsWith($distRoot, [StringComparison]::OrdinalIgnoreCase)) {
+if (-not $outputRoot.StartsWith($distRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Portable output must remain inside $distRoot"
 }
 $baselineBuild = [IO.Path]::GetFullPath((Join-Path $projectRoot 'dist\RetroTV-Portable'))
@@ -20,6 +23,14 @@ $oldestInternetBuild = [IO.Path]::GetFullPath((Join-Path $projectRoot 'dist\Retr
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "Python environment not found: $Python"
 }
+if (Test-Path -LiteralPath (Join-Path $outputRoot 'user-data')) {
+    throw 'Refusing to build over an installation with user-data. Choose a fresh dist output folder.'
+}
+$evidenceArgs = @('--cache', $MediaCache)
+if ($InternalBuild) { $evidenceArgs += '--internal' }
+if ($SkipSmokeTests -and -not $InternalBuild) { throw 'Only internal builds may skip media and application smoke tests.' }
+$packageVersion = (& $Python -c "import tomllib; from pathlib import Path; print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])").Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Unable to determine package version.' }
 
 function Copy-TreeMissing {
     param([string]$Source, [string]$Destination)
@@ -55,8 +66,11 @@ function Write-Utf8NoBom {
 }
 
 Write-Output 'Installing the portable build dependency...'
-& $Python -m pip install -r (Join-Path $projectRoot 'requirements.lock') pyinstaller
+& $Python -m pip install -r (Join-Path $projectRoot 'requirements.lock') -r (Join-Path $projectRoot 'requirements-build.lock')
 if ($LASTEXITCODE -ne 0) { throw 'Portable build dependencies could not be installed.' }
+Write-Output 'Verifying pinned media packages and corresponding-source evidence...'
+& $Python (Join-Path $projectRoot 'scripts\windows_toolchain.py') verify @evidenceArgs
+if ($LASTEXITCODE -ne 0) { throw 'Media source evidence is incomplete or inconsistent. Public packaging stopped before freezing.' }
 
 $workRoot = Join-Path $projectRoot '.build\portable-windows'
 if (Test-Path -LiteralPath $workRoot) {
@@ -69,6 +83,12 @@ if (Test-Path -LiteralPath $workRoot) {
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
 Write-Output 'Freezing CRTV Sim and RetroWeather...'
+# PyInstaller resolves native dependencies from PATH too. Do not accidentally
+# bundle DLLs from unrelated installed applications (e.g. Poppler/Conda tools).
+$pythonBase = (& $Python -c 'import sys; print(sys.base_prefix)').Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Unable to identify the selected Python runtime.' }
+$env:CRTV_BUILD_GIT = (Get-Command git -ErrorAction Stop).Source
+$env:PATH = @((Split-Path -Parent ([IO.Path]::GetFullPath($Python))), $pythonBase, (Join-Path $pythonBase 'DLLs'), (Join-Path $pythonBase 'Library\bin'), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot) -join ';'
 & $Python -m PyInstaller `
     --noconfirm `
     --clean `
@@ -137,19 +157,12 @@ if (Test-Path -LiteralPath $tools) {
     }
     Remove-Item -LiteralPath $resolvedTools -Recurse -Force
 }
-$ffmpegTools = Join-Path $tools 'ffmpeg'
-$mpvTools = Join-Path $tools 'mpv'
-New-Item -ItemType Directory -Path $ffmpegTools,$mpvTools -Force | Out-Null
-$ffmpeg = (Get-Command ffmpeg -ErrorAction Stop).Source
-$ffprobe = (Get-Command ffprobe -ErrorAction Stop).Source
-$mpvCommand = Get-Command mpv -ErrorAction Stop
-$mpvDirectory = Split-Path -Parent $mpvCommand.Source
-$mpv = Join-Path $mpvDirectory 'mpv.exe'
-if (-not (Test-Path -LiteralPath $mpv)) { $mpv = $mpvCommand.Source }
-Copy-Item -LiteralPath $ffmpeg -Destination (Join-Path $ffmpegTools 'ffmpeg.exe') -Force
-Copy-Item -LiteralPath $ffprobe -Destination (Join-Path $ffmpegTools 'ffprobe.exe') -Force
-Copy-Item -LiteralPath $mpv -Destination (Join-Path $mpvTools 'mpv.exe') -Force
-Get-ChildItem -LiteralPath $mpvDirectory -Filter '*.dll' -File | Copy-Item -Destination $mpvTools -Force
+& $Python (Join-Path $projectRoot 'scripts\windows_toolchain.py') stage --output $outputRoot @evidenceArgs
+if ($LASTEXITCODE -ne 0) { throw 'Pinned media tools could not be staged.' }
+$runtimeArgs = @('--output', $outputRoot)
+if ($InternalBuild) { $runtimeArgs += '--internal' }
+& $Python (Join-Path $projectRoot 'scripts\microsoft_runtime.py') @runtimeArgs
+if ($LASTEXITCODE -ne 0) { throw 'Microsoft runtime redistribution evidence is incomplete.' }
 
 $defaultsConfig = Join-Path $outputRoot 'portable-defaults\user-data\config'
 New-Item -ItemType Directory -Path $defaultsConfig -Force | Out-Null
@@ -170,27 +183,31 @@ $base = $base.Replace('mpv = "mpv"', 'mpv = "./tools/mpv/mpv.exe"')
 Write-Utf8NoBom -Path (Join-Path $defaultsConfig 'base.example.toml') -Content $base
 
 # Clean public defaults never use a development profile or weather cache.
-& $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') $outputRoot
+$prepareArgs = @($outputRoot)
+if ($InternalBuild) { $prepareArgs += '--internal' }
+& $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') @prepareArgs
 if ($LASTEXITCODE -ne 0) { throw 'Public defaults preparation failed.' }
-$licenseRoot = Join-Path $outputRoot 'licenses'
-$ffmpegPackageRoot = Split-Path -Parent (Split-Path -Parent $ffmpeg)
-$ffmpegLicense = Join-Path $ffmpegPackageRoot 'LICENSE'
-$ffmpegBuildReadme = Join-Path $ffmpegPackageRoot 'README.txt'
-if (-not (Test-Path -LiteralPath $ffmpegLicense) -or -not (Test-Path -LiteralPath $ffmpegBuildReadme)) {
-    throw 'The selected FFmpeg package must include its upstream LICENSE and README.txt build inventory.'
-}
-Copy-Item -LiteralPath $ffmpegLicense -Destination (Join-Path $licenseRoot 'FFmpeg-LICENSE.txt') -Force
-Copy-Item -LiteralPath $ffmpegBuildReadme -Destination (Join-Path $licenseRoot 'FFmpeg-BUILD-README.txt') -Force
-foreach ($notice in @('mpv-Copyright.txt', 'mpv-LICENSE.GPL.txt', 'Vulkan-Loader-LICENSE.txt')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $licenseRoot $notice))) {
-        throw "Required bundled media-tool notice is missing: $notice"
-    }
-}
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.ps1') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.48.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.cmd') -Destination (Join-Path $distRoot 'Rollback-CRTV-Sim-0.9.48.cmd') -Force
 if (-not $SkipArchive) {
-    & $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') $outputRoot --archive
+    & $Python (Join-Path $projectRoot 'scripts\windows_toolchain.py') sources --output $outputRoot --version $packageVersion @evidenceArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Matching source archive could not be prepared.' }
+    & $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') @prepareArgs --archive
     if ($LASTEXITCODE -ne 0) { throw 'Public archive verification failed.' }
+}
+if (-not $SkipSmokeTests) {
+    & $Python (Join-Path $projectRoot 'scripts\check-media-tools.py') $outputRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Bundled media capability tests failed.' }
+    $smokeRoot = Join-Path $projectRoot ('.test-tmp\portable-release-smoke-' + [guid]::NewGuid().ToString('N'))
+    $smokeArgs = @('--build', $outputRoot, '--root', $smokeRoot)
+    if (-not $SkipArchive) {
+        $archiveVersion = $packageVersion
+        if ($InternalBuild) { $archiveVersion += '-INTERNAL' }
+        $windowsArchive = Join-Path (Split-Path -Parent $outputRoot) ('CRTV-Sim-' + $archiveVersion + '-Windows.zip')
+        $smokeArgs += @('--archive', $windowsArchive)
+    }
+    & $Python (Join-Path $projectRoot 'scripts\smoke-distribution.py') @smokeArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Extracted portable application smoke test failed.' }
 }
 
 $size = (Get-ChildItem -LiteralPath $outputRoot -File -Recurse | Measure-Object Length -Sum).Sum

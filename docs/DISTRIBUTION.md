@@ -6,7 +6,8 @@ the application directory and double-click **CRTV-Sim.exe**. No administrator
 rights or separate Python installation are required. Windows 10/11, 64-bit, with
 working graphics/audio drivers is the supported target. Other versions are untested.
 
-First launch opens local setup. Select your media folder and confirm your timezone.
+First launch opens local setup. Acknowledge the bundled Microsoft runtime terms,
+which apply only to Microsoft's component. Select your media folder and confirm your timezone.
 Choose presentation, video normalization, audio normalization and commercial-tail
 trimming independently. All media processing choices start off for a fresh profile.
 Review the summary before starting. Optional Weather and paid AI services can be
@@ -56,8 +57,8 @@ already containing commercials remain intact. Templates contain no personal medi
 
 ## Processing and storage
 
-Video presets are ceilings: 480p 640×480, 720p 1280×720, 1080p 1920×1080,
-4K 3840×2160, or Custom. Larger sources fit within the ceiling; smaller sources
+Video presets are ceilings: 480p 640Ã—480, 720p 1280Ã—720, 1080p 1920Ã—1080,
+4K 3840Ã—2160, or Custom. Larger sources fit within the ceiling; smaller sources
 are not enlarged unless the independent upscale setting is enabled. Preserve
 source aspect and retro 4:3 correction are separate choices. Guide and generated
 station graphics remain SD; selecting 1080p does not make them HD.
@@ -85,10 +86,13 @@ writes; prefer a local, unsynchronized profile directory.
 2. Copy the existing `user-data` folder somewhere safe while CRTV Sim is stopped.
 3. Copy new `CRTV-Sim.exe`, `CRTV-Sim-Safe-Stop.exe`, `_internal`, `assets`,
    `migrations`, `tools`, `portable-defaults`, `pyproject.toml` and documentation
-   over the existing application folder. Merge the assets; keep your own fonts.
+   over the existing application folder. Also copy `licenses` and
+   `MICROSOFT-RUNTIME.json`. Merge the assets; keep your own fonts.
 4. **Do not replace or delete `user-data`, your Media library, or personal files.**
 5. Run CRTV-Sim.exe. Existing configuration and database identify the installation
-   as an upgrade even without a setup-completed marker. No mandatory setup runs.
+   as an upgrade even without a setup-completed marker. Library setup does not
+   repeat. If Microsoft runtime terms have not been acknowledged, a one-time
+   terms prompt appears before startup.
 
 Defaults already inherited by an existing profile are preserved. Database schema
 migrations create a pre-migration restore point when required. If updating fails,
@@ -125,7 +129,16 @@ to the maintainer through the project's discussion/support channel. Remove API
 keys, private filenames, network shares and usernames before sharing. Never upload
 your Credential Manager contents or entire profile as a default diagnostic step.
 
-This is an unsigned distribution candidate. Windows may show SmartScreen prompts.
+This is an unsigned distribution. Windows may show SmartScreen prompts.
 Verify the ZIP against its accompanying SHA256 checksum before running it. Hosting,
-code-signing, exact third-party corresponding-source release materials and an
-independent clean-machine test remain public-release gates; see THIRD-PARTY.md.
+code-signing and an independent clean-machine check are separate release steps.
+The packaging process requires matching third-party sources, runtime grant
+evidence and automated media/application smoke checks; see THIRD-PARTY.md.
+
+CRTV Sim is MIT-licensed; bundled FFmpeg, ffprobe, mpv, Python and libraries retain
+their separate terms in licenses/. Obtain the matching **ThirdParty-Sources.zip**
+and its required companion **ThirdParty-Build-Inputs.zip** from the same
+GitHub Release as the Windows ZIP, next to the binary download. Verify all
+downloads with SHA256SUMS.txt. Sources are optional for running the app.
+A package named INTERNAL is an incomplete development candidate and must not be
+published as a public release. Its manifest lists the remaining source evidence.

@@ -3,8 +3,9 @@ certifi==2026.7.22
 truststore==0.10.4
 
 # Python 3.11+ supplies TOML parsing, SQLite, HTTP serving, and unittest.
-# FFmpeg and FFprobe are external system tools discovered from the active profile
-# or PATH.
+# Public portable builds select media executables from packaging/windows-media.lock.json.
+# Development CLI profiles can still select installed tools.
+tzdata==2026.3
 
 # Breeze Blue TTS SDK and its locked runtime dependencies.
 breeze-blue==0.20.1

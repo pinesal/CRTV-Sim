@@ -14,6 +14,8 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_toolchain import EvidenceError, frozen_inventory, sha256, verify_output, verify_source_companions, write_json
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
@@ -38,7 +40,10 @@ def scaffold(root):
     ensure_channel_scaffold(root / '_channel_template', dayparts=SCOPES[:5], holidays=HOLIDAYS)
 
 
-def prepare(output):
+def prepare(output, *, internal=False):
+    media_evidence = verify_output(output)
+    if media_evidence['evidence']['problems'] and not internal:
+        raise EvidenceError('Public defaults blocked: media evidence is incomplete; use --internal only for development')
     defaults = output / 'portable-defaults/user-data'
     # No production profiles, provider customization or fixed TV blocks.
     # Always start from the source defaults. Repackaging an existing output
@@ -122,13 +127,19 @@ backend = "mpv"
         'mpv-Copyright.txt',
         'mpv-LICENSE.GPL.txt',
         'Vulkan-Loader-LICENSE.txt',
+        'ffmpeg-COPYING.GPLv3.txt',
+        'ffmpeg-COPYING.GPLv2.txt',
+        'ffmpeg-COPYING.LGPLv2.1.txt',
+        'ffmpeg-COPYING.LGPLv3.txt',
     }
     present_notices = {notice.name for notice in public_notices}
     missing_notices = required_notices - present_notices
     if missing_notices:
         raise ValueError(f'Missing bundled media-tool notices: {", ".join(sorted(missing_notices))}')
     for notice in public_notices:
-        shutil.copy2(notice, notices / notice.name)
+        if notice.is_file():
+            shutil.copy2(notice, notices / notice.name)
+    shutil.copy2(PROJECT / 'LICENSE', output / 'LICENSE')
     inventory = {'python': sys.version, 'platform': platform.platform(), 'packages': {}, 'tools': {}}
     for distribution in importlib.metadata.distributions():
         name = distribution.metadata.get('Name', 'unknown')
@@ -146,17 +157,64 @@ backend = "mpv"
     for relative in ('tools/ffmpeg/ffmpeg.exe', 'tools/ffmpeg/ffprobe.exe', 'tools/mpv/mpv.exe'):
         path = output / relative
         result = subprocess.run([str(path), '-version' if 'ffm' in relative or 'ffprobe' in relative else '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
+        if result.returncode != 0:
+            raise EvidenceError(f'Bundled media executable failed: {relative}: {result.returncode}')
+        if '--enable-nonfree' in result.stdout + result.stderr:
+            raise EvidenceError(f'Nonredistributable FFmpeg configuration: {relative}')
         inventory['tools'][relative] = {'sha256': sha256_file(path), 'version_and_build': result.stdout + result.stderr}
     for path in sorted((output / 'tools').rglob('*.dll')):
         relative = path.relative_to(output).as_posix()
         inventory['tools'][relative] = {'sha256': sha256_file(path)}
     write(output / 'BUILD-INVENTORY.json', json.dumps(inventory, indent=2))
+    frozen = frozen_inventory(output)
+    manifest = {'schema': 1, 'mode': 'INTERNAL' if internal else 'public candidate',
+                'media': media_evidence, 'frozen': frozen,
+                'problems': sorted(set(media_evidence['evidence']['problems'] + frozen['problems']))}
+    write_json(output / 'THIRD-PARTY-MANIFEST.json', manifest)
+    if manifest['problems'] and not internal:
+        raise EvidenceError('Public packaging blocked:\n- ' + '\n- '.join(manifest['problems']))
+    if internal:
+        write(output / 'INTERNAL-BUILD-NOT-FOR-DISTRIBUTION.txt',
+              'Internal test candidate. Public distribution is blocked.\n\n' + '\n'.join(manifest['problems']) + '\n')
+    # Only files prepared in this fresh build are eligible for archiving. This
+    # also detects files introduced after preparation, not only user-data/.
+    approved = {p.relative_to(output).as_posix(): sha256(p) for p in output.rglob('*') if p.is_file() and p.name != 'PACKAGE-FILES.json'}
+    write_json(output / 'PACKAGE-FILES.json', approved)
 
 
-def archive(output, version):
+def archive(output, version, *, internal=False):
+    verify_output(output)
+    manifest = json.loads((output / 'THIRD-PARTY-MANIFEST.json').read_text(encoding='utf-8'))
+    if not internal and (manifest['problems'] or manifest['mode'] == 'INTERNAL'):
+        raise EvidenceError('An internal/incomplete candidate cannot be packaged as a public release')
+    approved = json.loads((output / 'PACKAGE-FILES.json').read_text(encoding='utf-8'))
+    actual = {p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file() and p.name != 'PACKAGE-FILES.json'}
+    if actual != set(approved):
+        raise EvidenceError(f'Unapproved/missing package files: {sorted(actual ^ set(approved))}')
+    for relative, checksum in approved.items():
+        if sha256(output / relative) != checksum:
+            raise EvidenceError(f'Package file changed after validation: {relative}')
+        parts = Path(relative).parts
+        if parts[0] in ('user-data', '.git', '.env', 'config') or relative.lower().endswith(('.sqlite3', '.sqlite3-wal', '.sqlite3-shm', '.key', '.pfx')):
+            raise EvidenceError(f'Private/development file cannot be distributed: {relative}')
+    label = version + ('-INTERNAL' if internal else '')
+    source_path = output.parent / f'CRTV-Sim-{label}-ThirdParty-Sources.zip'
+    if not source_path.is_file():
+        raise EvidenceError('Matching ThirdParty-Sources.zip is required before packaging the application')
+    with zipfile.ZipFile(source_path) as source_zip:
+        if source_zip.testzip() is not None:
+            raise EvidenceError('Invalid source ZIP')
+        source_manifest = json.loads(source_zip.read('SOURCE-MANIFEST.json'))
+        if source_manifest['media'] != manifest['media']:
+            raise EvidenceError('Binary/source mapping differs between application and source package')
+        for name, record in source_manifest['sources'].items():
+            with source_zip.open(name) as stream:
+                if hashlib.file_digest(stream, 'sha256').hexdigest() != record['sha256']:
+                    raise EvidenceError(f'Source archive checksum mismatch: {name}')
+    companions = verify_source_companions(source_path, source_manifest)
     if any(path.is_file() for path in (output.parent / 'Media').rglob('*')):
         raise ValueError('The distribution Media scaffold contains files. Refusing to package potential personal media.')
-    archive_path = output.parent / f'CRTV-Sim-{version}-Windows.zip'
+    archive_path = output.parent / f'CRTV-Sim-{label}-Windows.zip'
     with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for tree in (output, output.parent / 'Media'):
             for path in sorted([tree, *tree.rglob('*')]):
@@ -166,13 +224,17 @@ def archive(output, version):
                 else:
                     archive.write(path, name)
     with zipfile.ZipFile(archive_path) as archive:
-        assert archive.testzip() is None
+        if archive.testzip() is not None:
+            raise EvidenceError('Windows ZIP integrity failure')
         names = archive.namelist()
         assert 'Media/_channel_template/specials/holidays/halloween/over-night/episodes/' in names
         assert not any(name.startswith(output.name + '/user-data/') for name in names)
     with archive_path.open('rb') as stream:
         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
     write(archive_path.with_suffix('.zip.sha256'), checksum + '  ' + archive_path.name + '\n')
+    write(output.parent / f'CRTV-Sim-{label}-SHA256SUMS.txt',
+          checksum + '  ' + archive_path.name + '\n' + sha256(source_path) + '  ' + source_path.name + '\n' +
+          ''.join(sha256(path)+'  '+path.name+'\n' for path in companions))
     print(f'Archive ready: {archive_path}; SHA256 {checksum}')
 
 
@@ -180,12 +242,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('output', type=Path)
     parser.add_argument('--archive', action='store_true')
+    parser.add_argument('--internal', action='store_true', help='Explicitly label a development package; never public-ready')
     args = parser.parse_args()
     output = args.output.resolve()
     if not output.is_relative_to(PROJECT / 'dist'):
         raise ValueError('Output must be under project dist')
     if args.archive:
         import tomllib
-        archive(output, tomllib.loads((PROJECT / 'pyproject.toml').read_text())['project']['version'])
+        archive(output, tomllib.loads((PROJECT / 'pyproject.toml').read_text())['project']['version'], internal=args.internal)
     else:
-        prepare(output)
+        prepare(output, internal=args.internal)

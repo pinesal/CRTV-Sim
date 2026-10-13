@@ -660,7 +660,9 @@ def _render_segment(
         ]
     overlay_input: list[str] = []
     audio_input_index = 1
-    filter_option = "-filter_script:v"
+    # Keep large graphs in files to avoid Windows command-line length limits.
+    # FFmpeg 9 removed the old filter_script/filter_complex_script options.
+    filter_option = "-/filter:v"
     video_map = "0:v:0"
     if screen.holiday_overlay is not None:
         overlay_input = [
@@ -677,7 +679,7 @@ def _render_segment(
             f"[seasonal]{decorated}[vout]",
             encoding="utf-8",
         )
-        filter_option = "-filter_complex_script"
+        filter_option = "-/filter_complex"
         video_map = "[vout]"
     else:
         filter_path.write_text(

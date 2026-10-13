@@ -272,6 +272,10 @@ def main(argv: list[str] | None = None) -> int:
             if not serve_setup(root):
                 return 0
             pending.unlink(missing_ok=True)
+        elif not needs_setup and not any(arg in {"--help", "-h", "--version"} for arg in arguments):
+            from retrotv.runtime_terms import confirm_upgrade
+            if not confirm_upgrade(root):
+                return 0
         os.chdir(root)
         if not profile.is_file():
             raise FileNotFoundError(f"Portable configuration is missing: {profile}")

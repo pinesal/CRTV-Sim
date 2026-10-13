@@ -85,6 +85,9 @@ class SetupService:
 
     def save(self, value):
         values = self.validate(value)
+        from retrotv.runtime_terms import accepted, acknowledge
+        if not accepted(self.root) and values.get("runtime_terms") is not True:
+            raise ValueError("Accept the bundled Microsoft runtime terms to continue")
         with self.lock:
             if self.completed:
                 raise ValueError("Setup has already completed")
@@ -115,6 +118,7 @@ class SetupService:
             # uses them, and no media processing starts during setup.
             atomic_json(settings, overrides)
             atomic_json(self.root / "user-data/state/setup-completed.json", {"schema_version": 1})
+            acknowledge(self.root)
             self.completed = True
         return {"ok": True, "message": "Setup saved. CRTV Sim will now open the Dashboard."}
 
@@ -144,14 +148,15 @@ button{padding:12px;margin:6px;background:#235e50;color:white;border:1px solid #
 <fieldset><legend>Optional services and maintenance</legend><label><input id="overnight" type="checkbox"> Use an overnight maintenance window (3 AM–5 AM)</label><p>Otherwise background readiness work runs when TV is stopped. Processing can use CPU and disk bandwidth.</p>
 <label><input id="weather" type="checkbox"> Enable the Weather channel</label><p>If enabled, you must finish RetroWeather setup: choose your location and fetch weather + create the channel. The Dashboard will guide you; Weather cannot be tuned until its first playable video is ready. Weather uses Open-Meteo. It is optional.</p>
 <p>AI graphics and announcers are optional and may incur provider charges. Add OpenAI or Breeze Blue credentials later in Settings. TV works without them. The Dashboard is local to this computer by default.</p></fieldset>
+<fieldset id="runtime-license" hidden><legend>Bundled Microsoft runtime</legend><p>These terms apply only to Microsoft's Visual C++ runtime. CRTV Sim and the other bundled components retain their own licenses.</p><label><input id="runtime_terms" type="checkbox"> I agree to the <a href="/setup/runtime-terms" target="_blank">Microsoft runtime terms</a>.</label></fieldset>
 <button type="submit">Review choices</button><button type="button" id="cancel">Exit without starting</button></form>
 <section id="review" hidden><h2>Ready to start?</h2><pre id="summary"></pre><button id="finish">Save and start CRTV Sim</button><button id="back">Change choices</button></section><p id="error" role="status"></p></main>
 <script>
 const $=id=>document.getElementById(id);const token='__TOKEN__';let values;
 async function api(path,value){const r=await fetch(path,{method:value?'POST':'GET',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:value?JSON.stringify(value):undefined});const d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d;}
-function collect(){const d={};for(const id of ['media','timezone','resolution','aspect','policy','backup','display'])d[id]=$(id).value;for(const id of ['video','audio','tails','fullscreen','weather','overnight'])d[id]=$(id).checked;return d;}
+function collect(){const d={};for(const id of ['media','timezone','resolution','aspect','policy','backup','display'])d[id]=$(id).value;for(const id of ['video','audio','tails','fullscreen','weather','overnight','runtime_terms'])d[id]=$(id).checked;return d;}
 $('timezone').value=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
-api('/api/setup/defaults').then(d=>{$('media').value=d.media;$('backup').value=d.backup;}).catch(e=>$('error').textContent=e.message);
+api('/api/setup/defaults').then(d=>{$('media').value=d.media;$('backup').value=d.backup;$('runtime-license').hidden=!d.runtime_terms_required;$('runtime_terms').required=d.runtime_terms_required;}).catch(e=>$('error').textContent=e.message);
 async function folders(path){const d=await api('/api/setup/folders?path='+encodeURIComponent(path));const box=$('folders');box.hidden=false;box.replaceChildren();for(const item of d.folders){const b=document.createElement('button');b.type='button';b.textContent=item;b.onclick=()=>{ $('media').value=item;folders(item).catch(e=>$('error').textContent=e.message);};box.append(b);}if(d.parent){const b=document.createElement('button');b.type='button';b.textContent='Parent folder';b.onclick=()=>folders(d.parent);box.append(b);}const done=document.createElement('button');done.type='button';done.textContent='Use selected folder';done.onclick=()=>box.hidden=true;box.append(done);}
 $('browse').onclick=()=>folders($('media').value).catch(e=>$('error').textContent=e.message);
 $('setup').onsubmit=async e=>{e.preventDefault();try{values=await api('/api/setup/preview',collect());$('summary').textContent=`Media: ${values.media}\nTimezone: ${values.timezone}\nDisplay: ${values.display}\nVideo normalization: ${values.video?'on':'off'} (${values.resolution}, ${values.aspect}, ${values.policy})\nAudio normalization: ${values.audio?'on — modifies working files':'off'}\nCommercial trimming: ${values.tails?'on — modifies commercials':'off'}\nBackups: ${values.backup}\nWeather: ${values.weather?'on; RetroWeather setup required before tuning':'off'}\nMaintenance: ${values.overnight?'3 AM–5 AM':'when TV is stopped'}`;$('setup').hidden=true;$('review').hidden=false;$('error').textContent='';}catch(e){$('error').textContent=e.message;}};
@@ -181,13 +186,19 @@ def serve_setup(root, *, open_browser=True):
             if url.path in {"/", "/setup"}:
                 self.reply(SETUP_HTML.replace("__TOKEN__", token), html=True)
                 return
+            if url.path == "/setup/runtime-terms":
+                import html
+                from retrotv.runtime_terms import terms
+                self.reply("<meta charset='utf-8'><pre style='white-space:pre-wrap'>" + html.escape(terms(Path(root)) or "No bundled Microsoft runtime terms.") + "</pre>", html=True)
+                return
             if self.headers.get("X-Setup-Token") != token:
                 self.reply({"error": "Setup token required"}, 403)
                 return
             if url.path == "/api/setup/defaults":
                 candidates = (Path(root).parent / "Media", Path(root) / "Media")
                 media = next((p for p in candidates if p.is_dir()), candidates[0])
-                self.reply({"media": str(media.resolve()), "backup": str(Path(root) / "user-data/originals-backup")})
+                from retrotv.runtime_terms import accepted
+                self.reply({"media": str(media.resolve()), "backup": str(Path(root) / "user-data/originals-backup"), "runtime_terms_required": not accepted(Path(root))})
             elif url.path == "/api/setup/folders":
                 path = Path(parse_qs(url.query).get("path", [""])[0])
                 try:
