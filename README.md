@@ -31,11 +31,18 @@ network access, rescanning and current limitations.
 CRTV Sim builds always-on TV channels directly from your video files. It does
 not require Plex or another media server: put media in channel and daypart
 folders, and CRTV Sim scans it, builds schedules and a guide, and tunes into
-whatever program is already in progress. It is designed for collections gathered
-from different sources and with different formats and quality levels. Optional
-video and audio preparation, automatic aspect analysis, and review tools help
-bring that library into a consistent presentation, while the deeper controls
-stay available when you want them.
+whatever program is already in progress. Its goal is to simulate the feel of a
+mid-1990s local cable TV service, including scheduled programming and the
+commercials, bumpers, and station continuity that go with it.
+
+That also means CRTV Sim deliberately keeps the viewing experience simple. It
+does not aim for modern channel artwork, cover art, rich program details, or
+elaborate overlays. You get a basic channel identity and guide, with the
+programming itself providing the character of the service. CRTV Sim is designed
+for collections gathered from different sources and with different formats and
+quality levels. Optional video and audio preparation, automatic aspect analysis,
+and review tools help bring that library into a consistent presentation, while
+deeper controls stay available when you want them.
 
 New to CRTV Sim? Start with the plain-language
 [Getting Started guide](docs/GETTING_STARTED.md). The rest of this README and the
