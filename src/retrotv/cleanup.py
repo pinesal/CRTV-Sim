@@ -180,20 +180,8 @@ class GeneratedAssetCleanup:
                 candidate, summary, protected, now, maximum_age
             ):
                 self._clear_announcement_reference(candidate)
-        generic = output / "generic"
-        if generic.is_dir():
-            active = {
-                Path(row["audio_path"]).resolve()
-                for row in self.connection.execute(
-                    "SELECT audio_path FROM announcement_generic_audio WHERE status='ready' AND audio_path IS NOT NULL"
-                )
-            }
-            for candidate in generic.glob("*.wav"):
-                if candidate.resolve() in active:
-                    continue
-                self._remove_if_old(
-                    candidate, summary, protected, now, narrated_age
-                )
+        # Completed generic recordings are user-prepared, reusable fallbacks.
+        # Never age them out, including outdated and unreferenced versions.
         test_output = output / "tests"
         if test_output.is_dir():
             test_age = max(

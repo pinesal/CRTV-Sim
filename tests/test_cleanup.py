@@ -212,6 +212,16 @@ class GeneratedAssetCleanupTests(unittest.TestCase):
             "SELECT output_path FROM announcement_jobs LIMIT 1"
         ).fetchone()["output_path"])
 
+    def test_generic_recordings_never_age_out_even_without_database_references(self):
+        now = time.time()
+        generic = self.announcements / "generic"
+        generic.mkdir()
+        paths = [generic / name for name in ("channel.wav", "channel-night.wav", "channel-weekly-special.wav", "old-unused.wav")]
+        for path in paths:
+            self._age(path, now, 400)
+        GeneratedAssetCleanup(self.connection, self.config).run(force=True, now=now)
+        self.assertTrue(all(path.exists() for path in paths))
+
     def _asset(self, relative: str, contents: bytes) -> int:
         path = self.media / Path(relative)
         path.parent.mkdir(parents=True, exist_ok=True)

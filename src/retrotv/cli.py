@@ -574,12 +574,21 @@ def main(argv: list[str] | None = None) -> int:
                 asset_ids = [
                     int(row["id"]) for row in service.pending_assets(limit=args.limit)
                 ]
-            totals = {"analyzed": 0, "midpoint": 0, "natural": 0, "error": 0}
+            totals = {"analyzed": 0, "midpoint": 0, "quiet_pause": 0, "natural": 0, "error": 0}
             for index, asset_id in enumerate(asset_ids, 1):
                 try:
                     result = service.analyze_asset(asset_id)
                     totals["analyzed"] += 1
-                    totals["midpoint" if result.method == "midpoint" else "natural"] += 1
+                    if result.status == "error":
+                        totals["error"] += 1
+                    else:
+                        methods = {row["method"] for row in connection.execute(
+                            "SELECT method FROM asset_break_candidates WHERE asset_id=? AND selected=1",
+                            (asset_id,),
+                        )}
+                        category = ("midpoint" if "midpoint" in methods else
+                                    "quiet_pause" if "quiet_pause" in methods else "natural")
+                        totals[category] += 1
                     offsets = service.selected_offsets(asset_id)
                     times = ", ".join(f"{value / 1000:.3f}s" for value in offsets)
                     outcome = f"{result.method}; {len(offsets)} break(s) at {times}"

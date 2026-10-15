@@ -246,6 +246,8 @@ class ExternalMediaTests(unittest.TestCase):
                 self.assertEqual(len(external),1)
                 self.assertEqual(external[0]['channel_slug'],'nickelodeon')
                 self.assertEqual(external[0]['item_count'],3)
+                self.assertGreater(external[0]['upcoming_appearances'],0)
+                self.assertFalse(external[0]['upcoming_not_scheduled'])
                 self.assertFalse(external[0]['recurring_unplaced'])
                 GuideService(self.db,self.config).snapshot(when)
 

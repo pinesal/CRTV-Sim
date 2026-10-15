@@ -5,6 +5,7 @@ import uuid
 from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from retrotv.config import AppConfig
 from retrotv.db import apply_migrations, connect_database, ensure_storage_root, utc_now
@@ -242,6 +243,7 @@ class PlaybackTests(unittest.TestCase):
             datetime(2026, 7, 27, 0, 30, tzinfo=resolver.scheduler.timezone),
         )
         self.assertEqual(target.title, "Test Episode")
+        self.assertEqual(target.series_title, "Test")
         self.assertAlmostEqual(target.media_offset_seconds, 1800, delta=0.01)
         self.assertAlmostEqual(target.remaining_seconds, 1800, delta=0.01)
         self.assertEqual(target.representation, "original")
@@ -545,6 +547,45 @@ class PlaybackTests(unittest.TestCase):
         self.assertEqual(target.entry_type, "weekly_special_promo_opportunity")
         self.assertEqual(target.path, fallback.resolve())
         self.assertEqual(target.representation, "generated_announcement_silent")
+
+    def test_old_silent_up_next_is_replaced_by_current_generic_at_playback(self):
+        entry = self.connection.execute(
+            "SELECT id,starts_at FROM schedule_entries WHERE generation_id=? AND entry_type='announcement_opportunity' ORDER BY starts_at LIMIT 1",
+            (self.generation.generation_id,),
+        ).fetchone()
+        silent = self.temporary / "silent-up-next.mp4"
+        spoken = self.temporary / "generic-up-next.mp4"
+        silent.write_bytes(b"silent"); spoken.write_bytes(b"spoken")
+        self.connection.execute("UPDATE announcement_opportunities SET fallback_path=?,fallback_mode='silent' WHERE schedule_entry_id=?", (str(silent), entry["id"]))
+        self.connection.commit()
+        with patch("retrotv.announcements.UpNextRenderer.fallback_is_current", return_value=False), patch(
+            "retrotv.announcements.UpNextRenderer.render_opportunity",
+            return_value=SimpleNamespace(output=spoken, audio_mode="generic"),
+        ) as render:
+            target = ScheduleResolver(self.connection, self.config).resolve("fox", datetime.fromisoformat(entry["starts_at"]))
+        self.assertEqual(target.path, spoken)
+        self.assertEqual(target.representation, "generated_announcement_generic")
+        self.assertFalse(render.call_args.kwargs["use_tts"])
+
+    def test_failed_up_next_visual_uses_continuity_and_keeps_timeline(self):
+        entry = self.connection.execute(
+            "SELECT id,starts_at,ends_at FROM schedule_entries WHERE generation_id=? AND entry_type='announcement_opportunity' ORDER BY starts_at LIMIT 1",
+            (self.generation.generation_id,),
+        ).fetchone()
+        continuity = self.temporary / "up-next-continuity.mp4"
+        continuity.write_bytes(b"continuity")
+        with patch("retrotv.announcements.UpNextRenderer.render_opportunity", side_effect=RuntimeError("FFmpeg failed")), patch(
+            "retrotv.playback.ensure_continuity_slate", return_value=continuity
+        ):
+            resolver = ScheduleResolver(self.connection, self.config)
+            target = resolver.resolve("fox", datetime.fromisoformat(entry["starts_at"]))
+            self.assertEqual(target.path, continuity)
+            self.assertEqual(target.representation, "generated_continuity_fallback")
+            self.assertEqual(target.ends_at, datetime.fromisoformat(entry["ends_at"]))
+            self.assertIsNotNone(resolver.resolve("fox", target.ends_at))
+        self.assertIn("FFmpeg failed", self.connection.execute(
+            "SELECT fallback_reason FROM announcement_opportunities WHERE schedule_entry_id=?", (entry["id"],)
+        ).fetchone()[0])
 
     def test_guide_is_a_playable_generated_channel(self):
         guide_path = self.temporary / "guide.mp4"

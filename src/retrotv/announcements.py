@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import uuid
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -58,6 +59,8 @@ class AnnouncementResult:
     duration_seconds: float
     tts_provider: str
     cached: bool
+    audio_mode: str = "silent"
+    fallback_reason: str | None = None
 
 
 class TTSProvider(Protocol):
@@ -548,6 +551,8 @@ class UpNextService:
 
 
 class UpNextRenderer:
+    _fallback_failures: dict[tuple[str, int, str], tuple[float, str]] = {}
+    _fallback_video_validation: dict[tuple, bool] = {}
     def __init__(
         self, connection, config, *, tts_provider: TTSProvider | None = None,
         script_provider=None, ai_client: OpenAIHTTPClient | None = None,
@@ -582,17 +587,36 @@ class UpNextRenderer:
         audio_override: Path | None = None,
         voice_override: str | None = None,
         instructions: str = "",
+        select_generic: bool = True,
     ) -> AnnouncementResult:
         plan = plan_override or self.service.build_plan(
             channel_slug, when, listing_count=listing_count
         )
+        if not use_tts and audio_override is None and select_generic and not plan.weekly_special_promo:
+            recordings, reason = self.profiles.generic_recordings(
+                channel_slug, plan.daypart_slug, plan.weekly_collection_slug
+            )
+            for recording in [*recordings, None]:
+                try:
+                    result = self.render(
+                        channel_slug, when, listing_count=listing_count, output=output,
+                        use_tts=False, force=force or (output is not None and recording is not None), exact_duration=exact_duration,
+                        background=background, music=music, plan_override=plan,
+                        audio_override=recording.path if recording else None,
+                        voice_override=voice_override, instructions=instructions, select_generic=False,
+                    )
+                    return replace(result, audio_mode="generic" if recording else "silent", fallback_reason=reason)
+                except Exception as exc:
+                    if recording is None:
+                        raise
+                    reason = f"Generic audio could not be incorporated: {exc}"
         provider = provider_override or self._provider(
             use_tts,
             channel_slug,
             plan.daypart_slug,
             plan.weekly_collection_slug,
         )
-        provider_label = provider.name if provider else "none"
+        provider_label = provider.name if provider else "generic" if audio_override else "none"
         voice, rate = self._voice_settings(channel_slug)
         if voice_override is not None:
             voice = voice_override
@@ -620,15 +644,21 @@ class UpNextRenderer:
                 weekly_collection_slug=plan.weekly_collection_slug,
             )
         target = output or self._cache_path(
-            plan, provider, voice, rate, background=background, music=music, instructions=instructions
+            plan, provider, voice, rate, background=background, music=music, instructions=instructions,
+            audio=audio_override,
         )
         target = target if target.is_absolute() else (Path.cwd() / target).resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file() and not force:
-            duration = self._validate(target)
-            return AnnouncementResult(
-                target, plan, duration, provider_label, True
-            )
+            try:
+                duration = self._validate(target, exact_duration)
+                return AnnouncementResult(
+                    target, plan, duration, provider_label, True,
+                    "ai" if provider else "generic" if audio_override else "silent",
+                )
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                # Repair a damaged cached video before abandoning usable speech.
+                pass
 
         work = target.parent / f".retrotv-up-next-{uuid.uuid4().hex}"
         work.mkdir(parents=True)
@@ -672,6 +702,7 @@ class UpNextRenderer:
             actual_duration,
             provider_label,
             False,
+            "ai" if provider else "generic" if audio_override else "silent",
         )
 
     def render_opportunity(
@@ -682,6 +713,121 @@ class UpNextRenderer:
         force: bool = False,
         activate: bool = True,
     ) -> AnnouncementResult:
+        if not use_tts:
+            return self._render_fallback(opportunity_id, force=force, activate=activate)
+        try:
+            result = self._render_ai_opportunity(opportunity_id, force=force, activate=activate)
+            return replace(result, audio_mode="ai")
+        except Exception as exc:
+            plan = self.service.build_opportunity_plan(opportunity_id)
+            if not plan.weekly_special_promo:
+                try:
+                    self._render_fallback(opportunity_id, activate=True, ai_error=str(exc))
+                except Exception as fallback_error:
+                    self.connection.execute(
+                        "UPDATE announcement_opportunities SET fallback_reason=? WHERE id=?",
+                        (f"AI failed: {exc}; fallback render failed: {fallback_error}", opportunity_id),
+                    )
+                    self.connection.commit()
+            # Keep the failed AI job visible. Its fallback is activated separately.
+            raise
+
+    def _fallback_selection(self, opportunity_id, plan):
+        if plan.weekly_special_promo:
+            return [], "Weekly promo uses its visual fallback"
+        row = self.connection.execute(
+            "SELECT starts_at,ends_at FROM announcement_opportunities WHERE id=?", (opportunity_id,)
+        ).fetchone()
+        seconds = (datetime.fromisoformat(row["ends_at"]) - datetime.fromisoformat(row["starts_at"])).total_seconds()
+        recordings, reason = self.profiles.generic_recordings(
+            plan.channel_slug, plan.daypart_slug, plan.weekly_collection_slug,
+            maximum_duration=seconds - float(self.settings.get("ending_silence_seconds", 1.25)),
+        )
+        available = []
+        for recording in recordings:
+            failure = self._fallback_failures.get((str(self._output_dir()), opportunity_id, recording.identity))
+            if failure and time.monotonic() - failure[0] < 60:
+                reason = failure[1]
+            else:
+                available.append(recording)
+        return available, reason
+
+    def fallback_is_current(self, opportunity_id: int) -> bool:
+        row = self.connection.execute(
+            "SELECT fallback_path,fallback_mode,fallback_audio_identity,starts_at,ends_at FROM announcement_opportunities WHERE id=?",
+            (opportunity_id,),
+        ).fetchone()
+        if row is None or not row["fallback_path"] or not Path(row["fallback_path"]).is_file():
+            return False
+        plan = self.service.build_opportunity_plan(opportunity_id)
+        if plan.weekly_special_promo:
+            return True
+        recordings, _reason = self._fallback_selection(opportunity_id, plan)
+        if (row["fallback_mode"] != ("generic" if recordings else "silent")
+                or row["fallback_audio_identity"] != (recordings[0].identity if recordings else None)):
+            return False
+        path = Path(row["fallback_path"])
+        try:
+            stat = path.stat()
+            seconds = (datetime.fromisoformat(row["ends_at"]) - datetime.fromisoformat(row["starts_at"])).total_seconds()
+            key = (str(path), stat.st_size, stat.st_mtime_ns, seconds)
+            if key not in self._fallback_video_validation:
+                if len(self._fallback_video_validation) >= 256:
+                    self._fallback_video_validation.clear()
+                try:
+                    self._validate(path, seconds)
+                    self._fallback_video_validation[key] = True
+                except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                    self._fallback_video_validation[key] = False
+            return self._fallback_video_validation[key]
+        except OSError:
+            return False
+
+    def _render_fallback(self, opportunity_id, *, force=False, activate=True, ai_error=None):
+        plan = self.service.build_opportunity_plan(opportunity_id)
+        row = self.connection.execute(
+            "SELECT cache_key,starts_at,ends_at FROM announcement_opportunities WHERE id=?", (opportunity_id,)
+        ).fetchone()
+        recordings, reason = self._fallback_selection(opportunity_id, plan)
+        graphics = GraphicsService(self.connection, self.config)
+        background = graphics.select(plan.channel_slug, "up-next", plan.starts_at,
+                                     daypart_slug=plan.daypart_slug, weekly_collection_slug=plan.weekly_collection_slug)
+        music = graphics.select_music(plan.channel_slug, "up-next", plan.starts_at,
+                                      daypart_slug=plan.daypart_slug, weekly_collection_slug=plan.weekly_collection_slug)
+        duration = max(1.0, (datetime.fromisoformat(row["ends_at"]) - datetime.fromisoformat(row["starts_at"])).total_seconds())
+        # Each usable recording gets one attempt; silence is tried only after all fail.
+        for recording in [*recordings, None]:
+            kind = f"generic-{recording.identity[:16]}" if recording else "silent"
+            target = self._output_dir() / f"opportunity-{opportunity_id}-{row['cache_key'][:12]}-v9-{kind}.mp4"
+            try:
+                result = self.render(
+                    plan.channel_slug, plan.starts_at, output=target, use_tts=False, force=force,
+                    exact_duration=duration, background=background, music=music, plan_override=plan,
+                    audio_override=recording.path if recording else None, select_generic=False,
+                )
+            except Exception as exc:
+                if recording is None:
+                    raise
+                reason = f"Generic audio could not be incorporated: {exc}"
+                if len(self._fallback_failures) >= 256:
+                    self._fallback_failures.clear()
+                self._fallback_failures[(str(self._output_dir()), opportunity_id, recording.identity)] = (time.monotonic(), reason)
+                continue
+            mode = "generic" if recording else "silent"
+            explanation = (f"AI failed: {ai_error}" if ai_error else None)
+            if reason:
+                explanation = "; ".join(filter(None, (explanation, reason)))
+            if activate:
+                self.connection.execute(
+                    "UPDATE announcement_opportunities SET fallback_path=?,fallback_mode=?,fallback_audio_identity=?,"
+                    "fallback_reason=?,render_status='ready',updated_at=? WHERE id=?",
+                    (str(result.output), mode, recording.identity if recording else None, explanation,
+                     datetime.now().astimezone().isoformat(timespec="seconds"), opportunity_id),
+                )
+                self.connection.commit()
+            return replace(result, audio_mode=mode, fallback_reason=explanation)
+
+    def _render_ai_opportunity(self, opportunity_id: int, *, force=False, activate=True):
         plan = self.service.build_opportunity_plan(opportunity_id)
         row = self.connection.execute(
             "SELECT cache_key,starts_at,ends_at,opportunity_type,facts_json "
@@ -694,58 +840,45 @@ class UpNextRenderer:
         audio_override = None
         voice = None
         instructions = ""
-        if use_tts:
-            if plan.weekly_special_promo:
-                weekly = self.profiles.scoped_profile(
-                    plan.channel_slug,
-                    weekly_collection_slug=plan.weekly_collection_slug,
-                )
-                if not weekly.promo_narration_enabled:
-                    raise RuntimeError("AI promo narration is disabled for this weekly special")
-            profile = self.profiles.profile(
-                plan.channel_slug, plan.daypart_slug, plan.weekly_collection_slug
+        if plan.weekly_special_promo:
+            weekly = self.profiles.scoped_profile(
+                plan.channel_slug,
+                weekly_collection_slug=plan.weekly_collection_slug,
             )
-            if not profile.enabled:
-                raise RuntimeError(
-                    f"AI announcer is disabled for {profile.channel_name}"
-                )
-            script_provider = self._script_provider or OpenAIScriptProvider(self._ai_client)
-            if plan.weekly_special_promo:
-                promo_provider = self._promo_script_provider or OpenAIWeeklyPromoScriptProvider(self._ai_client)
-                profile = replace(profile, promo_prompt=weekly.promo_prompt)
-                facts = json.loads(row["facts_json"])
-                details = facts.get("weekly_special_promo", {})
-                facts["weekly_special_promo"] = {
-                    **details,
-                    "airing_at_display": (
-                        f"{plan.special_airing_at.strftime('%A, %B %d').replace(' 0', ' ')} "
-                        f"at {self.service._display_time(plan.special_airing_at)}"
-                    ) if plan.special_airing_at else "",
-                }
-                spoken_text = promo_provider.generate(profile, facts)
-            else:
-                spoken_text = script_provider.generate(profile, plan)
-            plan = replace(plan, spoken_text=spoken_text)
-            provider = self._tts_provider or provider_for_profile(profile, self.config, self._ai_client)
-            voice = profile_voice(profile)
-            instructions = profile.voice_instructions
-            kind = "narrated"
+            if not weekly.promo_narration_enabled:
+                raise RuntimeError("AI promo narration is disabled for this weekly special")
+        profile = self.profiles.profile(
+            plan.channel_slug, plan.daypart_slug, plan.weekly_collection_slug
+        )
+        if not profile.enabled:
+            raise RuntimeError(
+                f"AI announcer is disabled for {profile.channel_name}"
+            )
+        script_provider = self._script_provider or OpenAIScriptProvider(self._ai_client)
+        if plan.weekly_special_promo:
+            promo_provider = self._promo_script_provider or OpenAIWeeklyPromoScriptProvider(self._ai_client)
+            profile = replace(profile, promo_prompt=weekly.promo_prompt)
+            facts = json.loads(row["facts_json"])
+            details = facts.get("weekly_special_promo", {})
+            facts["weekly_special_promo"] = {
+                **details,
+                "airing_at_display": (
+                    f"{plan.special_airing_at.strftime('%A, %B %d').replace(' 0', ' ')} "
+                    f"at {self.service._display_time(plan.special_airing_at)}"
+                ) if plan.special_airing_at else "",
+            }
+            spoken_text = promo_provider.generate(profile, facts)
         else:
-            audio_override = None if plan.weekly_special_promo else self.profiles.generic_audio(
-                plan.channel_slug, plan.daypart_slug, plan.weekly_collection_slug
-            )
-            if audio_override and not plan.weekly_special_promo:
-                fingerprint = self.profiles.profile(
-                    plan.channel_slug, plan.daypart_slug, plan.weekly_collection_slug
-                ).fingerprint[:8]
-                kind = f"generic-{fingerprint}"
-            else:
-                kind = "silent"
+            spoken_text = script_provider.generate(profile, plan)
+        plan = replace(plan, spoken_text=spoken_text)
+        provider = self._tts_provider or provider_for_profile(profile, self.config, self._ai_client)
+        voice = profile_voice(profile)
+        instructions = profile.voice_instructions
         target = self._output_dir() / (
             # v6 chooses presentation scope from the introduced program. Keep
             # the old render as a cache miss so existing opportunities receive
             # their corrected daypart or Weekly Special artwork.
-            f"opportunity-{opportunity_id}-{row['cache_key'][:12]}-v8-{kind}.mp4"
+            f"opportunity-{opportunity_id}-{row['cache_key'][:12]}-v8-narrated.mp4"
         )
         graphics = GraphicsService(self.connection, self.config)
         background = graphics.select(
@@ -758,17 +891,13 @@ class UpNextRenderer:
             daypart_slug=plan.daypart_slug,
             weekly_collection_slug=plan.weekly_collection_slug,
         )
-        duration = (
-            max(1.0, (datetime.fromisoformat(row["ends_at"])
-                      - datetime.fromisoformat(row["starts_at"])).total_seconds())
-            if plan.weekly_special_promo
-            else float(self.settings.get("opportunity_duration_seconds", 30))
-        )
+        duration = max(1.0, (datetime.fromisoformat(row["ends_at"])
+                            - datetime.fromisoformat(row["starts_at"])).total_seconds())
         result = self.render(
             plan.channel_slug,
             plan.starts_at,
             output=target,
-            use_tts=use_tts,
+            use_tts=True,
             force=force,
             exact_duration=duration,
             background=background,
@@ -780,9 +909,8 @@ class UpNextRenderer:
             instructions=instructions,
         )
         if activate:
-            column = "validated_output_path" if use_tts else "fallback_path"
             self.connection.execute(
-                f"UPDATE announcement_opportunities SET {column}=?, render_status='ready', detail=NULL, updated_at=? WHERE id=?",
+                "UPDATE announcement_opportunities SET validated_output_path=?, render_status='ready', detail=NULL, updated_at=? WHERE id=?",
                 (str(result.output), datetime.now().astimezone().isoformat(timespec="seconds"), opportunity_id),
             )
             self.connection.commit()
@@ -798,6 +926,7 @@ class UpNextRenderer:
         background: Path | None = None,
         music: Path | None = None,
         instructions: str = "",
+        audio: Path | None = None,
     ) -> Path:
         identity = json.dumps(
             {
@@ -816,6 +945,7 @@ class UpNextRenderer:
                 "tts_model": getattr(provider, "model", None),
                 "background": self._file_identity(background),
                 "music": self._file_identity(music),
+                "audio": hashlib.sha256(audio.read_bytes()).hexdigest() if audio else None,
                 "renderer": 4,
             },
             sort_keys=True,

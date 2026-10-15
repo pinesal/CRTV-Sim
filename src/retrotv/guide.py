@@ -274,33 +274,54 @@ class GuideService:
             moment = moment.replace(tzinfo=self.timezone)
         else:
             moment = moment.astimezone(self.timezone)
+        slot_start = self._slot_start(moment)
+        column_moments = tuple(
+            slot_start + timedelta(minutes=offset)
+            for offset in self.offset_minutes
+        )
+        # Preview columns may extend into tomorrow's separately generated
+        # schedule. Include every date touched by a visible column, including
+        # columns that start before midnight but end after it.
+        window_start = min((moment, *column_moments))
+        window_end = max((moment, *column_moments)) + timedelta(minutes=self.slot_minutes)
         channel_rows = self.connection.execute(
             """
             SELECT c.*, sg.id AS generation_id
             FROM schedule_generations sg
             JOIN channels c ON c.id = sg.channel_id
             LEFT JOIN channel_playback_preferences p ON p.channel_id=c.id
-            WHERE sg.schedule_date = ? AND sg.status = 'active' AND c.enabled = 1
+            WHERE sg.schedule_date BETWEEN ? AND ?
+              AND sg.status = 'active' AND c.enabled = 1
               AND COALESCE(p.playback_mode,'scheduled')='scheduled'
-            ORDER BY c.channel_number IS NULL, c.channel_number, c.display_name
+            ORDER BY c.channel_number IS NULL, c.channel_number, c.display_name,
+                     c.id, sg.schedule_date
             """,
-            (moment.date().isoformat(),),
+            (window_start.date().isoformat(),
+             (window_end - timedelta(microseconds=1)).date().isoformat()),
         ).fetchall()
-        slot_start = self._slot_start(moment)
         channels = []
-        column_moments = tuple(
-            slot_start + timedelta(minutes=offset)
-            for offset in self.offset_minutes
-        )
+        schedules_by_channel: dict[int, list[int]] = {}
+        unique_channels = {}
+        for row in channel_rows:
+            channel_id = int(row["id"])
+            unique_channels.setdefault(channel_id, row)
+            schedules_by_channel.setdefault(channel_id, []).append(int(row["generation_id"]))
         configured_numbers = self.settings.get("channel_numbers", {})
         graphics = GraphicsService(self.connection, self.config)
-        for channel in channel_rows:
+        for channel_id, channel in unique_channels.items():
             if (
                 self.weather_definition.enabled
                 and str(channel["slug"]) == self.weather_definition.slug
             ):
                 continue
-            programs = self._program_listings(int(channel["generation_id"]))
+            programs = sorted(
+                (
+                    listing
+                    for generation_id in schedules_by_channel[channel_id]
+                    for listing in self._program_listings(generation_id)
+                ),
+                key=lambda listing: datetime.fromisoformat(listing.starts_at),
+            )
             columns = tuple(
                 self._listing_at(programs, moment)
                 if index == 0

@@ -439,14 +439,27 @@ class ApplicationRuntimeTests(unittest.TestCase):
                 ),
             )
             connection.commit()
+            connection.execute(
+                "UPDATE announcement_opportunities SET fallback_mode='silent' WHERE schedule_entry_id=?", (entry_id,)
+            )
+            connection.commit()
         runtime.requested_channel = "nickelodeon"
         runtime.tuned_since = now - timedelta(minutes=2)
         runtime.last_qualifying_user_activity = now
         runtime.controller = SimpleNamespace()
         runtime.tv_state = "playing"
-        runtime._check_announcement_demand()
+        with patch("retrotv.announcements.UpNextRenderer._validate", return_value=30):
+            runtime._check_announcement_demand()
         self.assertEqual(runtime.announcement_state["next_opportunity"]["channel"], "nickelodeon")
         self.assertNotIn("not defined", runtime.announcement_state.get("error") or "")
+        self.assertEqual(runtime.announcement_state["next_opportunity"]["audio_mode"], "silent")
+        # A legacy cached fallback has no proven audio identity; prepare it again.
+        with connect_database(self.config.database_path) as connection:
+            connection.execute("UPDATE announcement_opportunities SET fallback_mode=NULL WHERE schedule_entry_id=?", (entry_id,))
+        with patch("retrotv.runtime.threading.Thread") as thread:
+            runtime._check_announcement_demand()
+            thread.return_value.start.assert_called_once()
+            self.assertEqual(runtime.announcement_state["generation_state"], "rendering-fallback")
 
     def test_instance_lock_rejects_second_application(self):
         first = ApplicationRuntime(self.config)

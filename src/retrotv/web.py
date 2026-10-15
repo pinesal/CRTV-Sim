@@ -220,6 +220,8 @@ DASHBOARD_HTML = """<!doctype html>
           <dt>Next opportunity</dt><dd id="announce-next">—</dd>
           <dt>Eligibility</dt><dd id="announce-reason">—</dd>
           <dt>Generation</dt><dd id="announce-state">—</dd>
+          <dt>Audio</dt><dd id="announce-audio">—</dd>
+          <dt>Fallback reason</dt><dd id="announce-fallback-reason">—</dd>
           <dt>Error</dt><dd id="announce-error">—</dd>
         </dl>
       </div>
@@ -334,14 +336,20 @@ DASHBOARD_HTML = """<!doctype html>
         $("maintenance-state").className = `value ${readiness.state === "error" ? "bad" :
           readiness.state === "running" ? "warn" : "good"}`;
         const signature = JSON.stringify(data.channels);
+        const channelSelect = $("channel-select");
+        const previousChannelSelection = channelSelect.value;
         if (signature !== lastChannels) {
-          $("channel-select").replaceChildren(...data.channels.map(item => {
+          channelSelect.replaceChildren(...data.channels.map(item => {
             const option = document.createElement("option");
             option.value = item.slug; option.textContent = channelLabel(item); return option;
           }));
           lastChannels = signature;
         }
-        if (data.requested_channel) $("channel-select").value = data.requested_channel;
+        if (data.channels.some(item => item.slug === previousChannelSelection)) {
+          channelSelect.value = previousChannelSelection;
+        } else if (data.requested_channel) {
+          channelSelect.value = data.requested_channel;
+        }
         const maintenance = data.maintenance;
         $("readiness-state").textContent = readiness.state || "Idle";
         $("readiness-state").className = readiness.state === "error" ? "bad" :
@@ -359,7 +367,7 @@ DASHBOARD_HTML = """<!doctype html>
         $("normalization-result").textContent = maintenance.normalization ?
           `${maintenance.normalization.processed} processed; ${maintenance.normalization.review} review; ${maintenance.normalization.errors} errors` : "—";
         $("breakpoint-result").textContent = maintenance.breakpoints ?
-          `${maintenance.breakpoints.processed} processed; ${maintenance.breakpoints.natural} natural; ${maintenance.breakpoints.midpoint} midpoint; ${maintenance.breakpoints.errors} errors` : "—";
+          `${maintenance.breakpoints.processed} processed; ${maintenance.breakpoints.natural} natural; ${maintenance.breakpoints.quiet_pause ?? 0} quiet-pause fallback; ${maintenance.breakpoints.midpoint} midpoint; ${maintenance.breakpoints.errors} errors` : "—";
         $("audio-maintenance-result").textContent = maintenance.audio ?
           `${maintenance.audio.processed} processed; ${maintenance.audio.correction_needed} correction; ${maintenance.audio.review} review; ${maintenance.audio.errors} errors` : "—";
         $("schedules-created").textContent = maintenance.schedules_created ?? "—";
@@ -435,6 +443,9 @@ DASHBOARD_HTML = """<!doctype html>
           `${announcements.next_opportunity.starts_at} (${announcements.next_opportunity.seconds_away}s)` : "—";
         $("announce-reason").textContent = announcements.eligibility_reason || "—";
         $("announce-state").textContent = announcements.generation_state || "idle";
+        const audioMode = announcements.next_opportunity?.audio_mode;
+        $("announce-audio").textContent = ({ai:"AI narration", generic:"Generic narration", silent:"Music-only / silent"})[audioMode] || "Not prepared";
+        $("announce-fallback-reason").textContent = announcements.next_opportunity?.fallback_reason || "—";
         $("announce-error").textContent = announcements.error || "—";
         const batch = data.normalization_batch;
         const pending = data.pending_actions || {};
@@ -1015,6 +1026,10 @@ INDEX_HTML = """<!doctype html>
         <p class="muted">See which series, movies, blocks, and interstitial pools
           are available to each channel and scheduling collection. Episode and short
           counts use the series folder title.</p>
+        <p class="muted">Upcoming counts remaining program airings in currently generated
+          active schedules for every channel. Not scheduled means no airing in those
+          schedules; future dates without a generated schedule are not included.
+          Recurring lineup status is shown separately.</p>
         <section id="inventory-stats" class="stats"></section>
         <section class="toolbar">
           <input id="inventory-search" placeholder="Search series, movie, channel, or collection">
@@ -1024,6 +1039,7 @@ INDEX_HTML = """<!doctype html>
             <option value="">Any collection size</option>
             <option value="thin">Fewer than 5 items</option>
             <option value="review">Has review items</option>
+            <option value="not_scheduled">No upcoming programs</option>
             <option value="unplaced">Unplaced recurring series</option>
           </select>
           <button id="refresh-inventory">Refresh inventory</button>
@@ -1032,7 +1048,7 @@ INDEX_HTML = """<!doctype html>
           <table>
             <thead><tr><th>Series / Title</th><th>Type</th><th>Items</th><th>Shadows</th>
               <th>Ready</th><th>Review</th><th>Channel</th>
-              <th>Daypart or Collection</th><th>Upcoming</th><th>Total Runtime</th><th>Actions</th></tr></thead>
+              <th>Daypart or Collection</th><th>Upcoming</th><th>Recurring Lineup</th><th>Total Runtime</th><th>Actions</th></tr></thead>
             <tbody id="inventory"></tbody>
           </table>
           <div id="inventory-empty" class="empty" hidden>No matching media inventory.</div>
@@ -1151,6 +1167,8 @@ INDEX_HTML = """<!doctype html>
             <option value="">All eligible programs</option>
             <option value="pending">Pending analysis</option>
             <option value="analyzed">Analyzed</option>
+            <option value="fallback">All fallback breaks</option>
+            <option value="quiet_pause">Quiet-pause fallback</option>
             <option value="midpoint">Generic halfway fallback</option>
             <option value="manual">Manual overrides</option>
           </select>
@@ -1158,7 +1176,7 @@ INDEX_HTML = """<!doctype html>
         </section>
         <section class="table-wrap">
           <table>
-            <thead><tr><th>ID</th><th>Episode</th><th>Duration</th><th>Status</th>
+            <thead><tr><th>ID</th><th>Program / Episode</th><th>Duration</th><th>Status</th>
               <th>Selected break</th><th>Method</th><th>Confidence</th><th>Actions</th></tr></thead>
             <tbody id="breakpoints"></tbody>
           </table>
@@ -1597,6 +1615,7 @@ INDEX_HTML = """<!doctype html>
            && (!channel || item.channel_slug === channel)
            && (countFilter !== "thin" || Number(item.item_count) < 5)
            && (countFilter !== "review" || Number(item.review_count) > 0)
+           && (countFilter !== "not_scheduled" || Boolean(item.upcoming_not_scheduled))
            && (countFilter !== "unplaced" || Boolean(item.recurring_unplaced));
       });
       const body = $("inventory"); body.replaceChildren();
@@ -1637,15 +1656,19 @@ INDEX_HTML = """<!doctype html>
         addCell(row, item.review_count, Number(item.review_count) ? "status-open" : "");
         addCell(row, String(item.channel_slug).toUpperCase());
         addCell(row, item.location);
+        addCell(row, item.program_media
+          ? (item.upcoming_appearances ? `${item.upcoming_appearances} scheduled` : "Not scheduled")
+          : "—", item.upcoming_not_scheduled ? "status-open" : "");
         addCell(
           row,
           item.recurring_displaced
             ? `Holiday rotation; regular slot saved${item.holiday_upcoming_airings?.length
                 ? ` · next ${item.holiday_upcoming_airings[0].target_date}` : ""}`
             : item.recurring_unplaced
-              ? "No upcoming placement"
-              : (item.upcoming_appearances ? `${item.upcoming_appearances} scheduled`
-                : item.recurring_assigned ? "Recurring slot assigned" : "—"),
+              ? "No recurring slot"
+              : item.recurring_assigned ? "Recurring slot assigned"
+                : item.program_media && !item.recurring_channel && item.channel_slug !== "shared"
+                  ? "Not recurring" : "—",
           item.recurring_unplaced ? "status-open" : ""
         );
         addCell(row, inventoryDuration(item.duration_seconds));
@@ -2600,9 +2623,22 @@ INDEX_HTML = """<!doctype html>
       $("breakpoints-empty").hidden = data.items.length > 0;
       for (const item of data.items) {
         const row = document.createElement("tr");
-        addCell(row, item.id); addCell(row, item.display_title || item.original_filename);
+        addCell(row, item.id);
+        const title = item.display_title || item.original_filename;
+        const series = item.series_title;
+        const titleLower = String(title).trim().toLowerCase();
+        const seriesLower = String(series || "").trim().toLowerCase();
+        const namedTitle = seriesLower && titleLower !== seriesLower
+          && ![" ", "-", "—", "–", ":"].some(separator => titleLower.startsWith(seriesLower + separator))
+          ? `${series} — ${title}` : title;
+        const videoLink = document.createElement("a");
+        videoLink.href = `/api/assets/${item.id}/play`;
+        videoLink.target = "_blank"; videoLink.rel = "noopener";
+        videoLink.textContent = namedTitle;
+        videoLink.title = "Open full video to find a manual break";
+        addCell(row, "").append(videoLink);
         addCell(row, `${Math.round(item.duration_seconds)}s`);
-        addCell(row, item.break_status || "pending");
+        addCell(row, `${item.break_status || "pending"}${item.needs_reanalysis && ["analyzed", "manual"].includes(item.break_status) ? " — refresh pending" : ""}`);
         const selectedOffsets = item.selected_offsets_ms
           ? String(item.selected_offsets_ms).split(",").map(Number).sort((a, b) => a - b)
           : item.selected_offset_ms == null ? [] : [Number(item.selected_offset_ms)];
@@ -2610,9 +2646,11 @@ INDEX_HTML = """<!doctype html>
           ? selectedOffsets.map(formatBreakpoint).join(", ") : "—");
         const evidence = (item.selected_evidence || []).map(candidate => {
           const signals = candidate.signals || {};
-          const transition = signals.black_duration ? `black ${Number(signals.black_duration).toFixed(2)}s` :
+          const transition = candidate.method === "quiet_pause"
+            ? `Quiet-pause fallback (${(Number(signals.silence_duration_ms) / 1000).toFixed(2)}s at ${signals.silence_threshold_db} dB)`
+            : signals.black_duration ? `black ${Number(signals.black_duration).toFixed(2)}s` :
             signals.scene_change ? "scene change" : candidate.method;
-          const silence = signals.silence ? ", silence" : "";
+          const silence = signals.silence && candidate.method !== "quiet_pause" ? ", silence" : "";
           const chapter = signals.chapter_supported
             ? `, chapter ${formatBreakpoint(signals.chapter_marker_ms)} (${(signals.chapter_distance_ms / 1000).toFixed(1)}s away)` : "";
           return `${formatBreakpoint(candidate.offset_ms)}: ${transition}${silence}${chapter}`;
@@ -2629,7 +2667,7 @@ INDEX_HTML = """<!doctype html>
           label.textContent = `Break ${target.index} (near ${formatBreakpoint(target.target_ms)}): `;
           const current = document.createElement("span");
           current.textContent = target.selected
-            ? `${formatBreakpoint(target.selected.offset_ms)} — ${target.selected.method} (${Number(target.selected.score).toFixed(2)})${target.selected.signals?.reason ? `; ${target.selected.signals.reason}` : ""}`
+            ? `${formatBreakpoint(target.selected.offset_ms)} — ${target.selected.method === "quiet_pause" ? "Quiet-pause fallback" : target.selected.method} (${Number(target.selected.score).toFixed(2)})${target.selected.signals?.reason ? `; ${target.selected.signals.reason}` : ""}`
             : "no selected break";
           const manual = document.createElement("input"); manual.placeholder = "HH:MM:SS";
           manual.value = target.selected ? formatBreakpoint(target.selected.offset_ms) : "";
@@ -2969,6 +3007,7 @@ INDEX_HTML = """<!doctype html>
         });
         updateRecurringScheduleControls(data);
         await loadRecurringLineup();
+        await loadInventory();
         notice(data.presentation_format === "content_only"
           ? `Content Only saved for ${channel}. It schedules real media back-to-back with no station interruptions. Existing schedules are stale; generate or run maintenance to update them.`
           : (data.recurring_enabled
@@ -3280,7 +3319,15 @@ INDEX_HTML = """<!doctype html>
           field(announcer, labelText, name, kind);
         }
         const controls = document.createElement("div"); controls.className = "announcer-actions";
-        const status = document.createElement("span"); status.textContent = profile.generic?.status || "not generated";
+        const status = document.createElement("span");
+        const generic = profile.generic;
+        status.textContent = generic?.usable
+          ? generic.status === "failed" ? "Generation failed — previous recording available"
+            : generic.status === "generating" ? "Generating — previous recording available"
+            : generic.needs_update ? "Ready — update available" : "Ready"
+          : generic?.status === "generating" ? "Generating"
+            : generic?.audio_path ? "Recording missing or unusable" : "Not generated";
+        status.title = generic?.detail || generic?.availability_reason || "";
         const save = document.createElement("button"); save.textContent = "Save profile"; save.onclick = () => saveAnnouncerProfile(card, false);
         const generate = document.createElement("button"); generate.textContent = "Save & generate generic voice";
         generate.disabled = providerSelect.value === "breeze" ? !data.breeze_key_configured : !data.api_key_configured;
@@ -3456,6 +3503,7 @@ INDEX_HTML = """<!doctype html>
         await loadProgrammingRules();
         await loadBlocks();
         await loadStats();
+        await loadInventory();
       } catch (error) {
         notice(error.message, "error");
       }
@@ -3789,7 +3837,11 @@ SETTINGS_HTML = """<!doctype html>
       if (field.type === "boolean") {
         input = `<input id="${id}" data-path="${field.path}" data-type="boolean" type="checkbox" ${field.value ? "checked" : ""}>`;
       } else if (field.type === "select") {
-        input = `<select id="${id}" data-path="${field.path}" data-type="select">${field.options.map(value => `<option ${value === field.value ? "selected" : ""}>${esc(value)}</option>`).join("")}</select>`;
+        input = `<select id="${id}" data-path="${field.path}" data-type="select">${field.options.map(value => {
+          const label = field.path === "scheduling.midroll_fallback"
+            ? ({midpoint:"Quiet pause, then midpoint",none:"No fallback breaks"}[value] || value) : value;
+          return `<option value="${esc(value)}" ${value === field.value ? "selected" : ""}>${esc(label)}</option>`;
+        }).join("")}</select>`;
       } else if (field.type === "channel") {
         const choices = field.path === "application_layer.startup_channel"
           ? (state.startup_destinations || state.channels) : state.channels;
@@ -4269,8 +4321,7 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
     # removal or a scheduling block. It lets the owner see that a ready series
     # has no place in the currently generated future schedule.
     recurring_channels: set[str] = set()
-    scheduled_counts: dict[tuple[str, str, str], int] = {}
-    scheduled_any_daypart: dict[tuple[str, str], int] = {}
+    scheduled_assets: dict[int, list[dict[str, object]]] = {}
     recurring_slot_assignments: dict[tuple[str, str], set[str]] = {}
     seasonal_upcoming: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     try:
@@ -4285,30 +4336,39 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
         recurring_channels = {str(row["slug"]) for row in preference_rows}
         scheduled_rows = connection.execute(
             """
-            SELECT c.slug AS channel_slug,se.daypart_slug,
-                   COALESCE(a.series_title,a.display_title,a.original_filename)
-                       AS series_key,
-                   COUNT(*) AS appearances
+            WITH upcoming AS (
+            SELECT c.slug AS channel_slug,se.daypart_slug,se.asset_id,
+                   se.generation_id,se.sequence_group,se.id,
+                   CASE WHEN json_valid(se.explanation_json)
+                        THEN json_extract(se.explanation_json,'$.selection.series') END AS selected_series,
+                   CASE WHEN json_valid(se.explanation_json) THEN
+                        CASE WHEN json_type(se.explanation_json,'$.selection')='object'
+                             THEN json_extract(se.explanation_json,'$.selection.collection_type')
+                             ELSE a.collection_type END
+                        ELSE a.collection_type END AS collection_type,
+                   CASE WHEN json_valid(se.explanation_json) THEN
+                        CASE WHEN json_type(se.explanation_json,'$.selection')='object'
+                             THEN json_extract(se.explanation_json,'$.selection.collection')
+                             ELSE a.collection_slug END
+                        ELSE a.collection_slug END AS collection_slug
             FROM schedule_entries se
             JOIN schedule_generations sg ON sg.id=se.generation_id
             JOIN channels c ON c.id=se.channel_id
             JOIN assets a ON a.id=se.asset_id
             WHERE sg.status='active'
-              AND sg.schedule_date >= ?
               AND se.is_program=1
-              AND COALESCE(se.programming_owner,'base')='base'
-            GROUP BY c.slug,se.daypart_slug,series_key
-            """,
-            (date.today().isoformat(),),
+              AND julianday(se.ends_at) > julianday('now')
+            )
+            SELECT channel_slug,daypart_slug,asset_id,selected_series,collection_type,collection_slug,
+                   COUNT(DISTINCT CAST(generation_id AS TEXT) || ':' ||
+                         CAST(COALESCE(sequence_group,id) AS TEXT)) AS appearances
+            FROM upcoming
+            GROUP BY channel_slug,daypart_slug,asset_id,
+                     selected_series,collection_type,collection_slug
+            """
         ).fetchall()
         for row in scheduled_rows:
-            channel = str(row["channel_slug"])
-            series = str(row["series_key"])
-            count = int(row["appearances"])
-            scheduled_counts[(channel, str(row["daypart_slug"]), series)] = count
-            scheduled_any_daypart[(channel, series)] = (
-                scheduled_any_daypart.get((channel, series), 0) + count
-            )
+            scheduled_assets.setdefault(int(row["asset_id"]), []).append(dict(row))
         snapshot_rows = connection.execute(
             """SELECT c.slug AS channel_slug,r.state_json
                FROM recurring_lineup_snapshots r
@@ -4375,7 +4435,6 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
         location = str(item["daypart_slug"] or "")
         series_folder_name = posixpath.basename(str(item.get("folder_relative_path", ""))) or None
         if location in {"", "all-day", "daytime"}:
-            upcoming = scheduled_any_daypart.get((channel, title), 0)
             assigned = any(
                 title in series
                 for (assigned_channel, _part), series in recurring_slot_assignments.items()
@@ -4387,10 +4446,7 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
                 if series_folder_name and entry.get("series_folder_name") == series_folder_name
             ]
         else:
-            upcoming = scheduled_counts.get((channel, location, title), 0)
             compatible = {location}
-            if location == "daytime":
-                compatible = {"morning", "afternoon", "evening"}
             assigned = any(
                 title in recurring_slot_assignments.get((channel, part), set())
                 for part in compatible
@@ -4400,16 +4456,36 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
                 for entry in seasonal_upcoming.get((channel, title, part), [])
                 if series_folder_name and entry.get("series_folder_name") == series_folder_name
             ]
-        item["upcoming_appearances"] = upcoming if ordinary_series else 0
+        program_media = item["media_type"] in {"episode", "short", "movie", "complete_block"}
+        # Match the physical assets and their logical placement, rather than only
+        # a series label. This keeps regular and holiday folders, renamed shadows,
+        # and external assignments from borrowing unrelated schedule counts.
+        appearances = sum(
+            int(placement["appearances"])
+            for asset_id in group["asset_ids"]
+            for placement in scheduled_assets.get(asset_id, [])
+            if (channel == "shared" or placement["channel_slug"] == channel)
+            and (location in {"", "all-day"}
+                 or location == placement["daypart_slug"]
+                 or location == "daytime" and placement["daypart_slug"] in {"morning", "afternoon", "evening"})
+            and (placement["selected_series"] is None or item["media_type"] not in {"episode", "short"}
+                 or placement["selected_series"] == title)
+            and placement["collection_type"] == item["collection_type"]
+            and placement["collection_slug"] == item["collection_slug"]
+        ) if program_media else 0
+        item["program_media"] = program_media
+        item["upcoming_appearances"] = appearances
+        item["upcoming_not_scheduled"] = bool(program_media and appearances == 0)
+        item["recurring_channel"] = channel in recurring_channels
         item["recurring_assigned"] = bool(ordinary_series and assigned)
         item["holiday_upcoming_airings"] = sorted(
             holiday_airings, key=lambda entry: entry["target_date"]
         ) if ordinary_series else []
         item["recurring_displaced"] = bool(
-            ordinary_series and upcoming == 0 and assigned and holiday_airings
+            ordinary_series and appearances == 0 and assigned and holiday_airings
         )
         item["recurring_unplaced"] = bool(
-            ordinary_series and upcoming == 0 and not assigned
+            ordinary_series and appearances == 0 and not assigned
         )
         items.append(item)
     items.sort(key=lambda item: (
@@ -4938,20 +5014,27 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                 where = ["a.media_type IN ('episode','movie')", "m.duration_seconds > ?"]
                 values: list[object] = [minimum_seconds]
                 if status == "pending":
-                    where.append("(b.asset_id IS NULL OR b.status IN ('pending','error'))")
+                    where.append(f"""(b.asset_id IS NULL OR b.status IN ('pending','error') OR
+                        b.source_signature != CAST(a.file_size AS TEXT) || ':' ||
+                        CAST(a.modified_ns AS TEXT) || ':breaks-v{BreakpointAnalyzer.ANALYSIS_VERSION}')""")
                 elif status in {"analyzed", "manual"}:
                     where.append("b.status=?")
                     values.append(status)
                 elif status == "midpoint":
                     where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method='midpoint')")
+                elif status == "quiet_pause":
+                    where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method='quiet_pause')")
+                elif status == "fallback":
+                    where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method IN ('midpoint','quiet_pause'))")
                 elif status:
                     self._json({"error": "Invalid breakpoint status"}, 400)
                     return
                 with connect_database(database_path) as connection:
                     rows = connection.execute(
                         f"""
-                        SELECT a.id,a.display_title,a.original_filename,
+                        SELECT a.id,a.display_title,a.original_filename,a.series_title,
                                a.source_relative_path,m.duration_seconds,
+                               a.file_size,a.modified_ns,b.source_signature,
                                b.status AS break_status,b.selected_offset_ms,
                                b.selected_method,b.confidence,b.detail,b.analyzed_at,
                                (SELECT GROUP_CONCAT(c.offset_ms, ',')
@@ -4972,6 +5055,10 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                 with connect_database(database_path) as connection:
                     for row in rows:
                         item = dict(row)
+                        item["needs_reanalysis"] = (
+                            row["break_status"] in {None, "pending", "error"}
+                            or row["source_signature"] != BreakpointAnalyzer._signature(row)
+                        )
                         evidence = connection.execute(
                             """SELECT offset_ms,method,score,signals_json
                                FROM asset_break_candidates

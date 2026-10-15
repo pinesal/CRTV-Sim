@@ -255,7 +255,8 @@ class VariationTests(unittest.TestCase):
             try:
                 with urlopen(request) as response: return json.load(response)
             except HTTPError as exc:
-                exc.read(); raise
+                exc.add_note(exc.read().decode('utf-8', errors='replace'))
+                raise
         try:
             with patch('retrotv.web.GraphicsLab') as lab:
                 lab.return_value.root = lab_root; lab.return_value.generate.side_effect = generate

@@ -18,6 +18,7 @@ from typing import Callable, Mapping
 from retrotv.asset_paths import resolve_asset_path, is_external
 from retrotv.config import AppConfig
 from retrotv.scheduling import ScheduleBuilder
+from retrotv.track_preferences import SeriesTrackPreferences, describe_choice, match_choice
 from retrotv.synthetic import (
     SyntheticChannelError,
     SyntheticChannelReader,
@@ -114,6 +115,7 @@ class PlaybackTarget:
     video_filter: str | None = None
     missing_media: dict | None = None
     external: bool = False
+    series_title: str | None = None
 
 
 class PlaybackError(RuntimeError):
@@ -436,6 +438,7 @@ class ScheduleResolver:
             remaining,
             channel_slug,
             video_filter=self._watch_video_filter(episode),
+            series_title=str(episode["show_title"]),
         )
 
     def _resolve_channel_fallback(
@@ -553,7 +556,7 @@ class ScheduleResolver:
 
                 opportunity = self.connection.execute(
                     """
-                    SELECT id, fallback_path, validated_output_path
+                    SELECT id, fallback_path, validated_output_path, fallback_mode
                     FROM announcement_opportunities WHERE schedule_entry_id=?
                     """,
                     (int(row["id"]),),
@@ -562,24 +565,33 @@ class ScheduleResolver:
                     raise PlaybackError("Scheduled generated screen has no opportunity record")
                 narrated = Path(opportunity["validated_output_path"]) if opportunity["validated_output_path"] else None
                 fallback = Path(opportunity["fallback_path"]) if opportunity["fallback_path"] else None
+                renderer = UpNextRenderer(self.connection, self.config)
                 if narrated is not None and narrated.is_file():
                     path = narrated
                     representation = "generated_announcement_narrated"
-                elif fallback is not None and fallback.is_file():
+                elif fallback is not None and renderer.fallback_is_current(int(opportunity["id"])):
                     path = fallback
-                    representation = "generated_announcement_silent"
+                    representation = ("generated_announcement_generic" if opportunity["fallback_mode"] == "generic"
+                                      else "generated_announcement_silent")
                 else:
                     try:
-                        result = UpNextRenderer(self.connection, self.config).render_opportunity(
+                        result = renderer.render_opportunity(
                             int(opportunity["id"]), use_tts=False
                         )
+                        path = result.output
+                        representation = ("generated_announcement_generic" if result.audio_mode == "generic"
+                                          else "generated_announcement_silent")
                     except Exception as exc:
-                        raise PlaybackError(
-                            f"Unable to prepare the scheduled generated screen: {exc}"
-                        ) from exc
-                    path = result.output
-                    representation = "generated_announcement_silent"
+                        self.connection.execute(
+                            "UPDATE announcement_opportunities SET fallback_reason=? WHERE id=?",
+                            (f"Fallback render failed: {exc}", int(opportunity["id"])),
+                        )
+                        self.connection.commit()
+                        path = ensure_continuity_slate(self.config)
+                        representation = "generated_continuity_fallback"
                 media_offset = elapsed
+                if representation == "generated_continuity_fallback":
+                    media_offset %= 10.0
             else:
                 path = ensure_continuity_slate(self.config)
                 media_offset = elapsed % 10.0
@@ -644,6 +656,8 @@ class ScheduleResolver:
             remaining,
             channel_slug,
             external=external,
+            series_title=(str(row["series_title"])
+                          if row["is_program"] and row["series_title"] else None),
         )
 
     def _resolve_synthetic(
@@ -811,6 +825,13 @@ class MpvIpcPlayer(Player):
         self._reader_error: Exception | None = None
         self._actions: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._has_loaded_media = False
+        self._track_defaults = {"aid": "auto", "sid": "auto", "sub-visibility": True}
+        self._track_dirty = threading.Event()
+        self._track_changes: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
+        self._track_series: str | None = None
+        self._track_snapshot: dict | None = None
+        self._track_preferences: SeriesTrackPreferences | None = None
+        self._track_warning: str | None = None
 
     def start(self) -> None:
         if self.process and self.process.poll() is None:
@@ -890,6 +911,14 @@ class MpvIpcPlayer(Player):
             daemon=True,
         )
         self._reader_thread.start()
+        # Capture startup defaults once, before a series choice can alter mpv's
+        # options. Each new file starts from these defaults so one show's
+        # preferences cannot leak into another show or a commercial.
+        for name in self._track_defaults:
+            self._track_defaults[name] = self._command(["get_property", f"options/{name}"])
+        properties = ("aid", "sid", "sub-visibility", "track-list")
+        for observer_id, name in enumerate(properties, start=1001):
+            self._command(["observe_property", observer_id, name])
 
     def _input_config(self) -> str:
         target = self.config.storage_root("state") / "generated" / "mpv-input.conf"
@@ -935,6 +964,15 @@ class MpvIpcPlayer(Player):
             self.file_loaded.set()
         if message.get("event") == "end-file" and message.get("reason") == "eof":
             self.file_completed.set()
+        if message.get("event") == "property-change" and message.get("name") in {
+            "aid", "sid", "sub-visibility", "track-list",
+        }:
+            # Never issue IPC commands or write preferences on the reader
+            # thread: command replies must continue flowing on this thread.
+            self._track_dirty.set()
+            if (self._track_series is not None
+                    and message.get("name") != "track-list" and "data" in message):
+                self._track_changes.put((message["name"], message["data"]))
         return message
 
     def _read_loop(self) -> None:
@@ -993,6 +1031,11 @@ class MpvIpcPlayer(Player):
     def load(self, target: PlaybackTarget) -> None:
         if target.path is None:
             raise PlaybackError("Continuity requires a generated slate")
+        self._remember_track_choices(force=True)
+        self._track_series = None
+        self._track_snapshot = None
+        while not self._track_changes.empty():
+            self._track_changes.get_nowait()
         self.start()
         focus_after_initial_load = self.foreground_on_start and not self._has_loaded_media
         self.file_loaded.clear()
@@ -1001,6 +1044,10 @@ class MpvIpcPlayer(Player):
             "start": f"{target.media_offset_seconds:.3f}",
             "pause": "yes",
             "vf": target.video_filter or "",
+            **{
+                name: ("yes" if value else "no") if isinstance(value, bool) else str(value)
+                for name, value in self._track_defaults.items()
+            },
         }
         if target.entry_type in {
             "continuity", "graphic_interstitial", "guide", "synthetic_channel",
@@ -1015,6 +1062,7 @@ class MpvIpcPlayer(Player):
             time_module.sleep(0.01)
         if not self.file_loaded.is_set():
             raise PlaybackError("mpv did not report file-loaded")
+        self._restore_track_choices(target.series_title)
         self._command(
             ["seek", target.media_offset_seconds, "absolute+exact"]
         )
@@ -1028,6 +1076,99 @@ class MpvIpcPlayer(Player):
         if focus_after_initial_load and self.process is not None:
             _focus_windows_process_window(self.process.pid)
         self._has_loaded_media = True
+
+    def _preferences(self) -> SeriesTrackPreferences:
+        if self._track_preferences is None:
+            self._track_preferences = SeriesTrackPreferences(
+                self.config.storage_root("state") / "series-track-preferences.json"
+            )
+        return self._track_preferences
+
+    def _read_track_snapshot(self) -> dict:
+        tracks = self._command(["get_property", "track-list"]) or []
+        if not isinstance(tracks, list):
+            raise PlaybackError("mpv returned an invalid track list")
+        tracks = [track for track in tracks if isinstance(track, dict)]
+        return {
+            "tracks": tracks,
+            **{
+                kind: next((track.get("id") for track in tracks
+                            if track.get("type") == kind and track.get("selected")), None)
+                for kind in ("audio", "sub")
+            },
+            "subtitle_visible": bool(self._command(["get_property", "sub-visibility"])),
+        }
+
+    def _warn_track_preferences(self, exc: Exception) -> None:
+        warning = str(exc)
+        if warning != self._track_warning:
+            print(f"Series audio/subtitle preferences: {warning}")
+            self._track_warning = warning
+
+    def _restore_track_choices(self, series: str | None) -> None:
+        if not series:
+            self._track_dirty.clear()
+            return
+        try:
+            preference = self._preferences().get(series)
+            tracks = self._read_track_snapshot()["tracks"]
+            for kind, property_name in (("audio", "aid"), ("sub", "sid")):
+                choice = preference.get(kind)
+                if isinstance(choice, dict):
+                    track_id = match_choice(tracks, kind, choice)
+                    if track_id is not None:
+                        self._command(["set_property", property_name, track_id])
+            visible = preference.get("subtitle_visible")
+            if isinstance(visible, bool):
+                self._command(["set_property", "sub-visibility", visible])
+            # Defaults, automatic restoration and unavailable-track fallbacks
+            # are the baseline, not new user choices to save.
+            self._track_dirty.clear()
+            self._track_snapshot = self._read_track_snapshot()
+            self._track_series = series
+        except (OSError, ValueError, PlaybackError) as exc:
+            self._warn_track_preferences(exc)
+
+    def _remember_track_choices(self, *, force: bool = False) -> None:
+        if (not self._track_series or self._track_snapshot is None
+                or self.connection is None or self._reader_error):
+            return
+        if not force and not self._track_dirty.is_set():
+            return
+        self._track_dirty.clear()
+        observed = []
+        while not self._track_changes.empty():
+            observed.append(self._track_changes.get_nowait())
+        try:
+            current = self._read_track_snapshot()
+            changes = {}
+            for kind, property_name in (("audio", "aid"), ("sub", "sid")):
+                # Preserve an explicit cycle back to the initial track, even
+                # when several key presses arrive between controller polls.
+                cycled = any(
+                    name == property_name and
+                    (None if value in (None, "no") else value) != self._track_snapshot[kind]
+                    for name, value in observed if value != "auto"
+                )
+                if current[kind] != self._track_snapshot[kind] or cycled:
+                    choice = describe_choice(current["tracks"], kind, current[kind])
+                    if choice is not None:
+                        changes[kind] = choice
+            visibility_changed = any(
+                name == "sub-visibility" and value != self._track_snapshot["subtitle_visible"]
+                for name, value in observed
+            )
+            if current["subtitle_visible"] != self._track_snapshot["subtitle_visible"] or visibility_changed:
+                changes["subtitle_visible"] = current["subtitle_visible"]
+            if changes:
+                self._preferences().update(self._track_series, changes)
+            self._track_snapshot = current
+            self._track_warning = None
+        except (OSError, ValueError, PlaybackError) as exc:
+            for change in observed:
+                self._track_changes.put(change)
+            self._track_dirty.set()
+            self._warn_track_preferences(exc)
 
     def is_running(self) -> bool:
         return bool(self.process and self.process.poll() is None)
@@ -1062,6 +1203,7 @@ class MpvIpcPlayer(Player):
         return True
 
     def poll_action(self) -> str | None:
+        self._remember_track_choices()
         try:
             return self._actions.get_nowait()
         except queue.Empty:
@@ -1082,6 +1224,10 @@ class MpvIpcPlayer(Player):
         self._command(["set_property", "mute", not muted])
 
     def stop(self) -> None:
+        if self.process and self.process.poll() is None:
+            self._remember_track_choices(force=True)
+        self._track_series = None
+        self._track_snapshot = None
         self._reader_stop.set()
         if self.process and self.process.poll() is None:
             self.process.terminate()

@@ -166,11 +166,10 @@ Their core source can be identified, but complete static dependency sources and
 exact build inputs were not recovered. The mpv recipe uses moving dependency
 references. Reconstructing those historical environments was not chosen.
 
-Read-only GitHub release inspection on 2026-10-12 found Windows ZIPs in
-`v0.9.47-test.20261011` and `v0.9.48-external-media-test`, with no matching source
-ZIPs. Making the repository public would expose those existing releases too.
-Before changing visibility, either resolve their exact source obligations or
-remove the old Windows download assets/releases with owner authorization and
-replace them with a verified paired distribution. Their prerelease flag is not
-a privacy boundary. Example-channel/music packs need their own media-rights
-review and retained notices. No existing release assets were changed by this task.
+The Windows downloads from `v0.9.47-test.20261011` and
+`v0.9.48-external-media-test` used those older toolchains without matching source
+ZIPs. Release 0.9.53 replaces those historical Windows downloads with a verified
+paired distribution. A prerelease flag is not a privacy boundary: all remaining
+published downloads become accessible when repository visibility changes.
+Example-channel/music packs are separate media downloads with their own source
+and rights notes; keep those notices with the media.

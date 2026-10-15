@@ -43,9 +43,10 @@ for the evidence and component license boundaries.
   mapping; document modifications (none to these media executables by CRTV Sim).
 - Assess codec patents, libdvdcss/anti-circumvention and Microsoft redistribution
   permissions for intended distribution regions. Obtain legal advice if needed.
-- Before making the repository public, address the old Windows assets in
-  v0.9.47-test.20261011 and v0.9.48-external-media-test; neither currently has a
-  matching source ZIP. Never remove/replace releases without owner authorization.
+- Before making the repository public, verify that the superseded Windows assets
+  in v0.9.47-test.20261011 and v0.9.48-external-media-test have been retired in
+  favor of the verified 0.9.53 distribution. Their original binaries lack matching
+  source ZIPs. Never remove/replace releases without owner authorization.
 - Review example-channel/media-pack rights separately. Signing and public hosting
   are owner decisions; they do not repair a source gap.
 

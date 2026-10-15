@@ -1,6 +1,7 @@
 """Exercise frozen first setup and legacy restart in an isolated local profile."""
 import json
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -13,7 +14,7 @@ import zipfile
 from urllib.request import Request, urlopen
 
 PROJECT = Path(__file__).resolve().parents[1]
-BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.48'
+BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.53'
 ROOT = PROJECT / '.test-tmp/Frozen distributión with spaces final'
 
 
@@ -85,6 +86,60 @@ def check_frozen_weather():
     print('Frozen Weather rendered and published a complete two-minute holiday broadcast with bundled FFmpeg')
 
 
+def create_test_episode(media):
+    """Create disposable programming, never use the owner's media library."""
+    video = media / 'Smoke TV/all-day/episodes/Smoke Series/S01E01.mp4'
+    video.parent.mkdir(parents=True)
+    subprocess.run([
+        str(ROOT / 'tools/ffmpeg/ffmpeg.exe'), '-hide_banner', '-loglevel', 'error',
+        '-y', '-f', 'lavfi', '-i', 'color=navy:s=320x240:r=1/10:d=1760',
+        '-f', 'lavfi', '-i', 'anullsrc=r=8000:cl=mono', '-t', '1760',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '1',
+        '-c:a', 'aac', '-b:a', '8k', '-shortest', str(video),
+    ], check=True, timeout=90, creationflags=subprocess.CREATE_NO_WINDOW)
+    return video
+
+
+def check_frozen_tv():
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        status = json.loads(api('/api/runtime/status'))
+        if status['maintenance']['state'] == 'error':
+            raise AssertionError(status['maintenance'])
+        channel = next((c for c in status['channels'] if c['slug'] == 'smoke-tv'), None)
+        if channel and status['maintenance']['state'] == 'idle':
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError(('Synthetic channel did not become ready', status))
+    guide = json.loads(api('/api/guide'))
+    listing = next(c for c in guide['channels'] if c['slug'] == channel['slug'])
+    assert listing['now']['asset_id'] is not None, listing
+    assert status['maintenance']['guide_rendered'], status['maintenance']
+    api('/api/runtime/start', {'channel': channel['slug']})
+    for _ in range(90):
+        status = json.loads(api('/api/runtime/status'))
+        assert not status['tv_error'], status
+        if (status['tv_state'] == 'playing' and status['now_playing']
+                and status['now_playing']['asset_id'] is not None):
+            assert status['now_playing']['entry_type'] == 'episode', status['now_playing']
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError(('Scheduled playback never started', status))
+    api('/api/runtime/tune', {'channel': '__guide__'})
+    for _ in range(30):
+        status = json.loads(api('/api/runtime/status'))
+        assert not status['tv_error'], status
+        if status['now_playing'] and status['now_playing']['entry_type'] == 'guide':
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError(('Rendered Guide playback never started', status))
+    api('/api/runtime/stop', {})
+    print('Frozen channel scan, schedule creation, Guide listings/rendering, episode playback and Guide tuning passed')
+
+
 def main():
     with socket.socket() as connection:
         connection.settimeout(1)
@@ -105,6 +160,8 @@ def main():
     base=ROOT/'portable-defaults/user-data/config/base.example.toml'
     # copytree hardlinked defaults: replace the inode before changing test values.
     text=base.read_text(encoding='utf-8').replace('schedule_horizon_days = 7','schedule_horizon_days = 1').replace('analyze_breakpoints = true','analyze_breakpoints = false')
+    text=text.replace('[player]', '[player]\nextra_args = ["--no-config", "--vo=null", "--ao=null", "--force-window=no"]')
+    text=text.replace('foreground_on_start = true', 'foreground_on_start = false')
     base.unlink(); base.write_text(text,encoding='utf-8')
     media=ROOT/'Empty média'; media.mkdir()
     process=launch()
@@ -118,6 +175,8 @@ def main():
                 'video':False,'audio':False,'tails':False,'weather':False,'runtime_terms':True}
         api('/api/setup/preview',values,token)
         assert not (ROOT/'user-data/database/retrotv.sqlite3').exists()
+        video = create_test_episode(media)
+        source_hash = hashlib.sha256(video.read_bytes()).hexdigest()
         api('/api/setup/complete',values,token)
         status=json.loads(wait('/api/runtime/status'))
         settings=json.loads(api('/api/settings'))
@@ -126,6 +185,8 @@ def main():
         assert fields['audio_normalization.enabled'] is False
         assert fields['normalization.canvas_width']==1920
         print('Frozen setup committed before scanning; Dashboard/settings available')
+        check_frozen_tv()
+        assert hashlib.sha256(video.read_bytes()).hexdigest() == source_hash
         stop(process)
         overlay=ROOT/'user-data/config/portable.windows.settings.json'
         payload=json.loads(overlay.read_text())

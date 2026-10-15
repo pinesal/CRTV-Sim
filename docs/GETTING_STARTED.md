@@ -161,6 +161,21 @@ that configured root. The pack includes a credits file with the music sources.
 
 ## How commercials, bumpers, and interstitials work
 
+The **Act Breaks** panel under **Library & Schedules** shows **Series — Episode**
+when the series name is known. Click a title to open the full video in another
+tab, then use the manual timestamp controls to choose a better break. Some
+source formats may need an external video player rather than browser playback.
+No source file is split or edited by choosing a breakpoint.
+
+If no strong natural cue is found, enabled fallbacks try a sustained quiet pause
+before the generic midpoint. These cuts are labeled **Quiet-pause fallback** and
+remain available for optional manual review. Use **All fallback breaks** to see
+both types. A quiet pause reduces the chance of cutting through dialogue but
+does not guarantee a scene has ended; background music can mask useful pauses.
+In Settings, **Quiet pause, then midpoint** enables both fallbacks and **No
+fallback breaks** disables both. Existing breaks remain usable while maintenance
+refreshes their analysis, and manual choices are preserved.
+
 These are three different kinds of station material:
 
 - **Commercials** are the ad clips in a channel's `commercials` folder. CRTV Sim
@@ -183,6 +198,21 @@ These are three different kinds of station material:
 The separate **Up Next** screen previews upcoming programming; an interstitial
 is a general station graphic used to cover a gap. Add station graphics through
 **Library & Schedules** if you prefer to upload or generate them in the Dashboard.
+
+Up Next can use AI narration when the watched channel meets the generation rules.
+If AI is unavailable or generation fails, it uses a prerecorded generic announcement.
+Choose **Save & generate generic voice** in Station Announcer Profiles to prepare
+that recording. A channel's recording works across its dayparts and weekly Up Next
+screens; optional profile-specific recordings can take precedence. Playing a saved
+recording requires no API key. Music-only video is the last resort when no usable
+recording is available or narration cannot be incorporated.
+
+Your last working recording stays available when you edit a profile or generate a
+replacement. **Ready — update available** means the recording can still play while
+you prepare a new version. A failed replacement does not discard it. Completed
+generic recordings are never deleted by automatic cleanup, and cached Up Next
+screens refresh their narration when a replacement becomes available. Weekly promo
+cards retain their separate narration behavior.
 
 ## 3. Let CRTV Sim scan and schedule
 
@@ -208,6 +238,14 @@ joins the program that belongs on at the current time, so a show may begin part
 way through rather than starting from its first frame. Channel changes follow
 the schedule. The remote-control keys shown on the Dashboard can also change
 channels and open the Guide.
+
+For shows with multiple audio or subtitle tracks, change tracks in the player
+as usual. CRTV Sim automatically remembers your last choice for that exact series
+name, including subtitles turned off. It reapplies the choice after commercial
+breaks, channel changes, and restarts, and shares it across channels showing the
+same series name. If a later episode lacks the chosen track, that episode uses
+its default without changing your saved preference. Tagged tracks are matched by
+language and title; untagged tracks use their order within the file.
 
 Weather is optional. If you enable it during setup, finish the location setup
 and create the first weather video before tuning to that channel. Other channels
@@ -241,6 +279,15 @@ new ZIP. The detailed update instructions are in
 [the Windows package guide](PORTABLE_WINDOWS.md).
 
 ## If something does not appear
+
+In **Library & Schedules → Programming Inventory**, **Upcoming** shows program
+airings remaining in generated schedules for all channels, including holiday and
+weekly-special programming. Commercial breaks within an episode do not count as
+extra airings. **Not scheduled** means there is no airing in those schedules;
+dates that have not been generated yet are not included. Choose **No upcoming
+programs** to find these entries. The separate **Recurring Lineup** column shows
+saved recurring assignments, including regular slots preserved during holiday
+rotation. Use **Refresh inventory** after background schedule generation.
 
 Reconnect the drive that contains your library, then use **Scan & update now**.
 If a new channel or file is still missing, check that it is under the correct

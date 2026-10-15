@@ -28,7 +28,10 @@ class BreakpointResult:
 class BreakpointAnalyzer:
     """Find and record every intended act break across a program."""
 
-    ANALYSIS_VERSION = 5
+    ANALYSIS_VERSION = 6
+    FALLBACK_METHODS = frozenset({"midpoint", "quiet_pause"})
+    QUIET_PAUSE_MIN_MS = 500
+    SILENCE_THRESHOLD_DB = -35
 
     def __init__(self, connection, config, *, cancel_event: Event | None = None):
         self.connection = connection
@@ -56,7 +59,7 @@ class BreakpointAnalyzer:
         maximum = None if limit is None else max(0, int(limit))
         if maximum == 0:
             return []
-        pending_where = """
+        pending_where = f"""
             a.media_type IN ('episode','movie')
             AND a.enabled_for_scheduling=1 AND a.review_status='ready'
             AND a.metadata_status='ready'
@@ -66,7 +69,7 @@ class BreakpointAnalyzer:
             AND m.duration_seconds > ?
             AND (b.asset_id IS NULL OR b.status IN ('pending', 'error') OR
                  b.source_signature != CAST(a.file_size AS TEXT) || ':' ||
-                 CAST(a.modified_ns AS TEXT) || ':breaks-v5')
+                 CAST(a.modified_ns AS TEXT) || ':breaks-v{self.ANALYSIS_VERSION}')
         """
         dates = self.connection.execute(
             """SELECT DISTINCT schedule_date FROM schedule_generations
@@ -139,7 +142,7 @@ class BreakpointAnalyzer:
     def selected_offsets(self, asset_id: int) -> list[int]:
         row = self.connection.execute(
             """
-            SELECT b.source_signature, b.status, b.selected_offset_ms,
+            SELECT b.source_signature, b.status, b.selected_offset_ms,b.selected_method,
                    a.file_size, a.modified_ns, m.duration_seconds
             FROM asset_break_analyses b JOIN assets a ON a.id=b.asset_id
             JOIN asset_media_info m ON m.asset_id=a.id
@@ -151,7 +154,9 @@ class BreakpointAnalyzer:
             return []
         base_signature = f"{row['file_size']}:{row['modified_ns']}"
         signature = f"{base_signature}:breaks-v{self.ANALYSIS_VERSION}"
-        if row["source_signature"] != signature:
+        # Version 5 recorded the same targets and spacing rules. Its cuts stay
+        # usable while the bounded maintenance queue refreshes their evidence.
+        if row["source_signature"] not in {signature, f"{base_signature}:breaks-v5"}:
             return []
         selected = self.connection.execute(
             """
@@ -163,12 +168,18 @@ class BreakpointAnalyzer:
         allow_fallback = str(self.config.data.get("scheduling", {}).get(
             "midroll_fallback", "midpoint")).casefold() == "midpoint"
         offsets = [int(item["offset_ms"]) for item in selected
-                   if allow_fallback or item["method"] != "midpoint"]
+                   if allow_fallback or item["method"] not in self.FALLBACK_METHODS]
         if not selected and row["selected_offset_ms"] is not None and (
-            allow_fallback or row["status"] == "manual"
+            allow_fallback or row["selected_method"] not in self.FALLBACK_METHODS
         ):
             offsets.append(int(row["selected_offset_ms"]))
-        return offsets
+        safe_offsets = []
+        duration_ms = round(float(row["duration_seconds"]) * 1000)
+        for offset in sorted(offsets):
+            if (self.minimum_segment_ms <= offset <= duration_ms - self.minimum_segment_ms
+                    and (not safe_offsets or offset - safe_offsets[-1] >= self.minimum_segment_ms)):
+                safe_offsets.append(offset)
+        return safe_offsets
 
     def target_offsets(self, duration_ms: int) -> list[int]:
         """Place targets about twelve content minutes apart across the whole file."""
@@ -240,6 +251,16 @@ class BreakpointAnalyzer:
                      )}
         allow_fallback = str(self.config.data.get("scheduling", {}).get(
             "midroll_fallback", "midpoint")).casefold() == "midpoint"
+
+        def fits_spacing(offset_ms: int, index: int) -> bool:
+            if selected_breaks and offset_ms - selected_breaks[-1]["offset_ms"] < self.minimum_segment_ms:
+                return False
+            return all(
+                offset_ms - offset >= self.minimum_segment_ms if other < index
+                else offset - offset_ms >= self.minimum_segment_ms
+                for other, offset in overrides.items() if other != index
+            )
+
         for index, target_ms in enumerate(targets, start=1):
             start_ms = max(
                 self.minimum_segment_ms, target_ms - self.search_window_ms
@@ -261,24 +282,33 @@ class BreakpointAnalyzer:
                     )
                     self._apply_chapter_hints(window_candidates, chapters, start_ms, end_ms)
                     window_candidates = [item for item in window_candidates
-                                         if item["method"] == "fade" or
-                                         item["signals"].get("silence") or
-                                         item["signals"].get("chapter_supported")]
-                    if not window_candidates and allow_fallback:
-                        selected = {
-                            "offset_ms": target_ms,
-                            "method": "midpoint",
-                            "score": 0.25,
-                            "signals": {"fallback": True, "reason": "no natural cue"},
-                        }
-                        window_candidates = [selected]
-                    elif window_candidates:
+                                         if (item["method"] == "fade" or
+                                             item["signals"].get("silence") or
+                                             item["signals"].get("chapter_supported"))
+                                         and fits_spacing(item["offset_ms"], index)]
+                    if window_candidates:
                         selected = max(window_candidates, key=lambda item: (
                             item["score"] + self._boundary_bonus(item["offset_ms"], duration_ms),
                             -abs(item["offset_ms"] - target_ms),
                         ))
+                    elif allow_fallback:
+                        window_candidates = [item for item in self._quiet_candidates(
+                            stderr, start_ms, end_ms, duration_ms
+                        ) if fits_spacing(item["offset_ms"], index)]
+                        selected = min(window_candidates, key=lambda item: (
+                            abs(item["offset_ms"] - target_ms),
+                            -item["signals"]["silence_duration_ms"], item["offset_ms"],
+                        )) if window_candidates else None
                     else:
                         selected = None
+                    if selected is None and allow_fallback and fits_spacing(target_ms, index):
+                        selected = {
+                            "offset_ms": target_ms,
+                            "method": "midpoint",
+                            "score": 0.25,
+                            "signals": {"fallback": True, "reason": "no natural cue or sustained quiet pause"},
+                        }
+                        window_candidates = [selected]
                 except ProcessCancelled:
                     raise
                 except Exception as exc:
@@ -362,7 +392,7 @@ class BreakpointAnalyzer:
             self.config.ffmpeg, "-hide_banner", "-nostdin", "-ss", f"{start_ms / 1000:.3f}",
             "-t", f"{duration:.3f}", "-i", os.fspath(source),
             "-vf", "scale=160:-2,blackdetect=d=0.08:pic_th=0.98,select='gt(scene,0.28)',showinfo",
-            "-af", "silencedetect=n=-35dB:d=0.15", "-f", "null", "-",
+            "-af", f"silencedetect=n={self.SILENCE_THRESHOLD_DB}dB:d=0.15", "-f", "null", "-",
         ]
         if self.cancel_event is not None:
             result = run_cancellable(args, max(60.0, duration * 4), self.cancel_event)
@@ -420,6 +450,41 @@ class BreakpointAnalyzer:
                                     "chapter_distance_ms": abs(marker - item["offset_ms"])})
             bonus = 0.12 if item["method"] == "fade" or item["signals"].get("silence") else 0.06
             item["score"] = min(1.0, item["score"] + bonus)
+
+    def _quiet_candidates(
+        self, stderr: str, start_ms: int, end_ms: int, duration_ms: int
+    ) -> list[dict]:
+        """Use measured, fully bounded pauses only after stronger cues fail."""
+        candidates = []
+        pause_start = None
+        window_ms = end_ms - start_ms
+        for match in re.finditer(r"silence_(start|end):\s*(-?[0-9.]+)", stderr):
+            point_ms = round(float(match[2]) * 1000)
+            if match[1] == "start":
+                pause_start = point_ms
+                continue
+            if pause_start is None:
+                continue
+            left, right = pause_start, point_ms
+            pause_start = None
+            # FFmpeg reports a leading silence from zero and closes trailing
+            # silence at EOF. Their full extent is unknown; allow 20 ms for
+            # timestamp/sample rounding at either edge of the scan.
+            if left <= 20 or right >= window_ms - 20 or right - left < self.QUIET_PAUSE_MIN_MS:
+                continue
+            offset_ms = start_ms + (left + right) // 2
+            if not self.minimum_segment_ms <= offset_ms <= duration_ms - self.minimum_segment_ms:
+                continue
+            candidates.append({
+                "offset_ms": offset_ms, "method": "quiet_pause", "score": 0.35,
+                "signals": {"fallback": True, "silence": True,
+                            "silence_start_ms": start_ms + left,
+                            "silence_end_ms": start_ms + right,
+                            "silence_duration_ms": right - left,
+                            "silence_threshold_db": self.SILENCE_THRESHOLD_DB,
+                            "reason": "no stronger natural cue; sustained quiet pause"},
+            })
+        return candidates
 
     def _parse_candidates(
         self, stderr: str, start_ms: int, midpoint_ms: int, duration_ms: int

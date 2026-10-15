@@ -147,6 +147,23 @@ class SchedulingTests(unittest.TestCase):
         self.assertNotEqual(before, ScheduleBuilder(
             self.connection, self.config)._configuration_fingerprint("fox"))
 
+    def test_quiet_pause_reanalysis_invalidates_generated_schedule(self):
+        self.add_asset(1, media_type="episode", daypart="all-day", duration=23 * 60, series="Series")
+        target = date(2026, 7, 27)
+        builder = ScheduleBuilder(self.connection, self.config)
+        builder.generate_day("fox", target)
+        self.assertTrue(builder.generation_is_current("fox", target))
+        self.connection.execute(
+            "UPDATE asset_break_analyses SET source_signature='1:1:breaks-v6',selected_method='quiet_pause' WHERE asset_id=1"
+        )
+        self.connection.execute(
+            "UPDATE asset_break_candidates SET method='quiet_pause',offset_ms=688000,signals_json=? WHERE asset_id=1",
+            (json.dumps({"fallback":True,"silence":True,"silence_duration_ms":800}),),
+        )
+        self.connection.commit()
+        self.assertFalse(ScheduleBuilder(self.connection, self.config).generation_is_current("fox", target))
+        self.assertEqual(BreakpointAnalyzer(self.connection, self.config).selected_offsets(1), [688000])
+
     def add_asset(
         self,
         asset_id: int,

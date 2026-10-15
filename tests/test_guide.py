@@ -382,6 +382,91 @@ class GuideServiceTests(unittest.TestCase):
         self.assertIsNone(payload["channels"][0]["columns"][0])
         self.assertIsNone(payload["channels"][0]["now"])
 
+    def _add_overnight_schedule(self, status="active"):
+        self.connection.execute(
+            """INSERT INTO schedule_generations(
+                id,channel_id,schedule_date,seed,configuration_fingerprint,
+                status,validation_status,generated_at
+            ) VALUES (2,1,'2026-07-29','overnight','overnight',?,'valid',?)""",
+            (status, utc_now()),
+        )
+        self.connection.execute(
+            """INSERT INTO schedule_entries(
+                generation_id,channel_id,asset_id,starts_at,ends_at,
+                entry_type,title,daypart_slug,sequence_group,sequence_position,is_program,
+                media_start_ms,media_end_ms
+            ) VALUES (1,1,2,'2026-07-28T23:30:00-07:00',
+                '2026-07-29T00:00:00-07:00','episode','Late Episode','night',10,10,1,0,1800000)"""
+        )
+        self.connection.executemany(
+            """INSERT INTO schedule_entries(
+                generation_id,channel_id,asset_id,starts_at,ends_at,
+                entry_type,title,daypart_slug,sequence_group,sequence_position,is_program,
+                media_start_ms,media_end_ms
+            ) VALUES (2,1,3,?,?,'episode',?,'over-night',?,?,1,0,1800000)""",
+            [
+                ("2026-07-29T00:00:00-07:00", "2026-07-29T00:30:00-07:00",
+                 "Midnight Episode", 1, 0),
+                ("2026-07-29T00:30:00-07:00", "2026-07-29T01:00:00-07:00",
+                 "Overnight Episode", 2, 1),
+            ],
+        )
+        self.connection.commit()
+
+    def test_preview_and_next_listing_cross_midnight(self):
+        self._add_overnight_schedule()
+        service = GuideService(self.connection, self.config)
+        before = service.snapshot(datetime.fromisoformat("2026-07-28T23:40:00-07:00"))
+        self.assertEqual(len(before["channels"]), 1)
+        fox = before["channels"][0]
+        self.assertEqual(
+            [item["title"] for item in fox["columns"]],
+            ["Late Episode", "Midnight Episode", "Overnight Episode"],
+        )
+        self.assertEqual(fox["next"]["title"], "Midnight Episode")
+        after = service.snapshot(datetime.fromisoformat("2026-07-29T00:00:00-07:00"))
+        self.assertEqual(fox["columns"][1:], after["channels"][0]["columns"][:2])
+        renderer = GuideRenderer(self.connection, self.config)
+        ass = renderer._ass_scroll(before, before["channels"], 10.0, 10.0, 54, 54)
+        self.assertNotIn("TBD", ass)
+
+    def test_missing_overnight_schedule_is_blank_until_published(self):
+        self._add_overnight_schedule(status="superseded")
+        service = GuideService(self.connection, self.config)
+        when = datetime.fromisoformat("2026-07-28T23:40:00-07:00")
+        before = service.snapshot(when)
+        self.assertEqual(before["channels"][0]["columns"][1:], (None, None))
+        self.connection.execute("UPDATE schedule_generations SET status='active' WHERE id=2")
+        after = service.snapshot(when)
+        self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+        self.assertEqual(after["channels"][0]["columns"][1]["title"], "Midnight Episode")
+
+    def test_preview_ignores_superseded_overnight_schedule(self):
+        self._add_overnight_schedule(status="superseded")
+        payload = GuideService(self.connection, self.config).snapshot(
+            datetime.fromisoformat("2026-07-28T23:40:00-07:00")
+        )
+        self.assertEqual(payload["channels"][0]["columns"][1:], (None, None))
+
+    def test_upcoming_channel_is_visible_without_current_day_schedule(self):
+        self._add_overnight_schedule()
+        self.connection.execute("UPDATE schedule_generations SET status='superseded' WHERE id=1")
+        payload = GuideService(self.connection, self.config).snapshot(
+            datetime.fromisoformat("2026-07-28T23:40:00-07:00")
+        )
+        self.assertEqual(len(payload["channels"]), 1)
+        fox = payload["channels"][0]
+        self.assertIsNone(fox["now"])
+        self.assertEqual(fox["columns"][1]["title"], "Midnight Episode")
+
+    def test_preview_loads_date_containing_end_of_custom_column(self):
+        self._add_overnight_schedule()
+        self.config.data["guide"]["columns_minutes"] = [0, 15]
+        payload = GuideService(self.connection, self.config).snapshot(
+            datetime.fromisoformat("2026-07-28T23:40:00-07:00")
+        )
+        self.assertEqual(payload["channels"][0]["columns"][1]["title"], "Midnight Episode")
+
     def test_columns_shift_forward_at_half_hour_boundary(self):
         service = GuideService(self.connection, self.config)
         before = service.snapshot(

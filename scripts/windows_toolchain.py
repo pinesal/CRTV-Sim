@@ -537,7 +537,7 @@ def main() -> None:
     parser.add_argument("action", choices=("verify", "stage", "sources"))
     parser.add_argument("--cache", type=Path, default=CACHE)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--version", default="0.9.48")
+    parser.add_argument("--version", default="0.9.53")
     parser.add_argument("--internal", action="store_true", help="Label incomplete evidence as INTERNAL; never certify it")
     args = parser.parse_args()
     if args.output and not args.output.resolve().is_relative_to((PROJECT / "dist").resolve()):

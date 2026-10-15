@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import shutil
+import subprocess
 import unittest
 import uuid
 from datetime import date, timedelta
@@ -26,6 +27,34 @@ def add_storage_fixture(connection):
 
 
 class WebLibraryTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node required for Dashboard behavior check')
+    def test_act_break_titles_link_to_full_video_without_duplicate_series(self):
+        start = INDEX_HTML.index('async function loadBreakpoints()')
+        end = INDEX_HTML.index('function renderSchedule(', start)
+        items = [
+            {'id':1,'series_title':'Show','display_title':'S01E01'},
+            {'id':2,'series_title':'Show','display_title':'Show — S01E01'},
+            {'id':3,'series_title':'Show','display_title':'SHOW - Episode'},
+            {'id':4,'series_title':None,'original_filename':'Special.mp4'},
+            {'id':5,'series_title':'Show','display_title':'Showdown'},
+            {'id':6,'series_title':'Show','display_title':'Show S01E02'},
+        ]
+        script = r'''
+          function element(tag) { return {tag,children:[],append(...nodes){this.children.push(...nodes)},replaceChildren(){this.children=[]}}; }
+          const elements = {'breakpoint-filter':{value:''},breakpoints:element('tbody'),'breakpoints-empty':{}};
+          const $ = name => elements[name];
+          const document = {createElement:element};
+          function addCell(row, text) { const cell=element('td');cell.textContent=text;row.append(cell);return cell; }
+        ''' + 'const api=async()=>({items:' + json.dumps(items) + '});\n' + INDEX_HTML[start:end] + r'''
+          loadBreakpoints().then(()=>process.stdout.write(JSON.stringify(elements.breakpoints.children.map(row=>row.children[1].children[0]))));
+        '''
+        result = subprocess.run(['node','-e',script], capture_output=True, text=True, encoding='utf-8', check=True, timeout=15)
+        links = json.loads(result.stdout)
+        self.assertEqual([link['textContent'] for link in links],
+                         ['Show — S01E01','Show — S01E01','SHOW - Episode','Special.mp4','Show — Showdown','Show S01E02'])
+        self.assertEqual(links[0]['href'], '/api/assets/1/play')
+        self.assertEqual(links[0]['target'], '_blank')
+
     def test_library_exposes_advisory_holiday_filename_review(self):
         self.assertIn("Holiday Filename Review", INDEX_HTML)
         self.assertIn('id="holiday-move-folder"', INDEX_HTML)
@@ -164,7 +193,10 @@ class WebLibraryTests(unittest.TestCase):
         self.assertIn("/api/inventory", INDEX_HTML)
         self.assertIn("Fewer than 5 items", INDEX_HTML)
         self.assertIn("Unplaced recurring series", INDEX_HTML)
-        self.assertIn("No upcoming placement", INDEX_HTML)
+        self.assertIn("No upcoming programs", INDEX_HTML)
+        self.assertIn("Not scheduled", INDEX_HTML)
+        self.assertIn("Recurring Lineup", INDEX_HTML)
+        self.assertIn("No recurring slot", INDEX_HTML)
         self.assertIn("Daypart or Collection", INDEX_HTML)
         self.assertIn("/api/inventory/open-folder", INDEX_HTML)
         self.assertIn("Shadow Files", INDEX_HTML)
@@ -299,7 +331,8 @@ class WebLibraryTests(unittest.TestCase):
             );
             CREATE TABLE schedule_entries(
                 channel_id INTEGER,asset_id INTEGER,is_program INTEGER,daypart_slug TEXT,
-                programming_owner TEXT,generation_id INTEGER
+                programming_owner TEXT,generation_id INTEGER,id INTEGER,
+                sequence_group INTEGER,ends_at TEXT,explanation_json TEXT
             );
             INSERT INTO assets VALUES(
                 1,'S01E01.mp4','episode','S01E01','Bewitched','nickelodeon','night',
@@ -330,6 +363,105 @@ class WebLibraryTests(unittest.TestCase):
         self.assertTrue(item["recurring_displaced"])
         self.assertEqual(item["holiday_upcoming_airings"][0]["target_date"], future)
         connection.close()
+
+    def test_inventory_counts_airings_across_channel_modes_and_collections(self):
+        from retrotv.db import apply_migrations
+
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        self.addCleanup(connection.close)
+        apply_migrations(connection, Path(__file__).resolve().parents[1] / "migrations")
+        connection.execute("INSERT INTO storage_roots(id,logical_name) VALUES(1,'media')")
+        for channel_id, slug in [(1, "pbs"), (2, "sci-fi")]:
+            connection.execute("INSERT INTO channels(id,slug,display_name) VALUES(?,?,?)",
+                               (channel_id, slug, slug))
+            connection.execute(
+                "INSERT INTO channel_schedule_preferences(channel_id,recurring_enabled,updated_at) VALUES(?,?,?)",
+                (channel_id, int(channel_id == 2), "2099-10-01"))
+        assets = [
+            (1, "Pappyland", "pbs", "morning", "episode", None, None),
+            (2, "Planet of the Apes", "sci-fi", "all-day", "episode", None, None),
+            (3, "Pappyland", "pbs", "morning", "episode", "holiday", "halloween"),
+            (4, "Movie", "pbs", "morning", "movie", None, None),
+            (5, "Pappyland", "pbs", "night", "episode", None, None),
+            (6, "Planet of the Apes", "sci-fi", "night", "episode", None, None),
+            (7, "Shared Short", "shared", "daytime", "short", None, None),
+            (8, "Block", "pbs", None, "complete_block", "weekly", "saturday"),
+        ]
+        for asset_id, title, channel, scope, media_type, collection, slug in assets:
+            connection.execute("""
+                INSERT INTO assets(id,source_root_id,source_relative_path,original_filename,
+                    file_size,modified_ns,media_type,display_title,series_title,channel_slug,
+                    daypart_slug,collection_type,collection_slug,integrity_status,review_status,
+                    enabled_for_scheduling,first_seen_at,last_seen_at)
+                VALUES(?,1,?,'episode.mp4',1,1,?,?,?,?,?,?,?,'ready','ready',1,'2099-10-01','2099-10-01')
+                """, (asset_id, f"{channel}/{asset_id}/episode.mp4", media_type, title,
+                         title if media_type in {"episode", "short"} else None,
+                         channel, scope, collection, slug))
+        connection.execute("""
+            INSERT INTO shadow_files(id,shadow_relative_path,target_asset_id,series_title,
+                channel_slug,daypart_slug,collection_type,collection_slug,status,
+                first_seen_at,last_seen_at,target_relative_path,file_size,modified_ns)
+            VALUES(1,'pbs/specials/weekly/reruns/episodes/Pappyland Reruns/episode.shadow',
+                1,'Pappyland Reruns','pbs',NULL,'weekly','reruns','ready','2099-10-01','2099-10-01',
+                'pbs/1/episode.mp4',1,1)
+        """)
+        connection.execute("""
+            INSERT INTO shadow_files(id,shadow_relative_path,target_asset_id,series_title,
+                channel_slug,daypart_slug,collection_type,collection_slug,status,
+                first_seen_at,last_seen_at,target_relative_path,file_size,modified_ns)
+            VALUES(2,'pbs/specials/weekly/same-name/episodes/Pappyland/episode.shadow',
+                1,'Pappyland','pbs',NULL,'weekly','same-name','ready','2099-10-01','2099-10-01',
+                'pbs/1/episode.mp4',1,1)
+        """)
+        for generation, channel, day, status in [
+            (1, 1, "2099-10-15", "active"), (2, 2, "2099-10-15", "active"),
+            (3, 1, "2099-10-16", "superseded"), (4, 1, "2000-01-01", "active"),
+        ]:
+            connection.execute("""INSERT INTO schedule_generations(id,channel_id,schedule_date,
+                seed,configuration_fingerprint,status,generated_at) VALUES(?,?,?,'seed','fp',?,?)""",
+                (generation, channel, day, status, day))
+
+        def airing(asset_id, generation=1, channel=1, group=1, part="morning",
+                   owner="base", selection=None, end="2099-10-15T07:30:00+00:00"):
+            connection.execute("""INSERT INTO schedule_entries(generation_id,channel_id,asset_id,
+                starts_at,ends_at,media_start_ms,media_end_ms,entry_type,title,daypart_slug,
+                sequence_group,sequence_position,is_program,programming_owner,explanation_json)
+                VALUES(?,?,?, ?,?,0,60000,'episode','Episode',?,?,1,1,?,?)""",
+                (generation, channel, asset_id, end[:10] + "T07:00:00+00:00", end,
+                 part, group, owner, json.dumps({"selection": selection}) if selection else "{}"))
+
+        ordinary_selection = {"series": "Pappyland", "collection_type": None, "collection": None}
+        airing(1, selection=ordinary_selection)  # Two acts form one airing.
+        airing(1, selection=ordinary_selection)
+        airing(1, group=2, selection=ordinary_selection)  # A real repeat is another airing.
+        airing(1, generation=3)
+        airing(1, generation=4, end="2000-01-01T07:30:00+00:00")
+        airing(2, generation=2, channel=2, part="evening")
+        airing(3, group=3, owner="halloween")
+        airing(4, group=4)
+        airing(7, group=5, part="afternoon")
+        airing(8, group=6, owner="saturday")
+        airing(1, group=7, owner="reruns", selection={"series": "Pappyland Reruns",
+               "collection_type": "weekly", "collection": "reruns"})
+        airing(1, group=8, owner="same-name", selection={"series": "Pappyland",
+               "collection_type": "weekly", "collection": "same-name"})
+        items = _media_inventory(connection)["items"]
+        by_id = {row["preview_asset_id"]: row for row in items if row["row_kind"] == "native"}
+        self.assertEqual(by_id[1]["upcoming_appearances"], 2)
+        self.assertFalse(by_id[1]["recurring_channel"])
+        self.assertFalse(by_id[1]["upcoming_not_scheduled"])
+        self.assertEqual(by_id[2]["upcoming_appearances"], 1)
+        self.assertTrue(by_id[2]["recurring_channel"])
+        self.assertFalse(by_id[2]["recurring_unplaced"])
+        for asset_id in (3, 4, 7, 8):
+            self.assertEqual(by_id[asset_id]["upcoming_appearances"], 1)
+        for asset_id in (5, 6):
+            self.assertEqual(by_id[asset_id]["upcoming_appearances"], 0)
+            self.assertTrue(by_id[asset_id]["upcoming_not_scheduled"])
+        self.assertTrue(by_id[6]["recurring_unplaced"])
+        for shadow in (row for row in items if row["row_kind"] == "shadow"):
+            self.assertEqual(shadow["upcoming_appearances"], 1)
 
     def test_asset_query_can_filter_normalization_review_queue(self):
         clause, values = _asset_query({"analysis_status": ["review"]})

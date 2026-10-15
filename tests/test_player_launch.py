@@ -47,6 +47,7 @@ class PlayerLaunchTests(unittest.TestCase):
             patch("retrotv.playback.subprocess.Popen", return_value=process) as popen,
             patch("retrotv.playback._open_windows_pipe", return_value=connection),
             patch("retrotv.playback._focus_windows_process_window") as focus,
+            patch.object(player, "_command", return_value=None),
         ):
             player.start()
         args = popen.call_args.args[0]

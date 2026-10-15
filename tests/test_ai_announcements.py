@@ -220,14 +220,122 @@ class AIAnnouncementTests(unittest.TestCase):
         self.assertEqual(status["status"], "ready")
         self.assertGreater(status["duration_seconds"], 0)
         self.service.update("nickelodeon", {"voice": "onyx"})
-        self.assertIsNone(self.service.generic_audio("nickelodeon"))
+        self.assertEqual(self.service.generic_audio("nickelodeon"), output)
         self.assertEqual(self.service.generic_status("nickelodeon")["status"], "stale")
+        self.assertTrue(self.service.generic_status("nickelodeon")["usable"])
+        self.assertTrue(self.service.generic_status("nickelodeon")["needs_update"])
 
     def test_profile_save_normalizes_voice_and_rejects_blank_models(self):
         profile = self.service.update("nickelodeon", {"voice": "Onyx"})
         self.assertEqual(profile.voice, "onyx")
         with self.assertRaisesRegex(ValueError, "Script model cannot be blank"):
             self.service.update("nickelodeon", {"script_model": ""})
+
+    def test_dynamic_settings_do_not_stale_generic_recording(self):
+        profile = self.service.update("nickelodeon", {"generic_script": "Stay tuned!"})
+        output = self.service.generate_generic("nickelodeon", OpenAITTSProvider(FakeOpenAIClient(), model=profile.speech_model))
+        self.service.update("nickelodeon", {"enabled": True, "script_model": "another-model",
+                                            "personality_prompt": "Something else", "maximum_words": 100})
+        status = self.service.generic_status("nickelodeon")
+        self.assertEqual(status["status"], "ready")
+        self.assertFalse(status["needs_update"])
+        self.assertEqual(self.service.generic_audio("nickelodeon", "morning"), output)
+
+    def test_failed_regeneration_preserves_last_success_and_works_during_generation(self):
+        profile = self.service.update("nickelodeon", {"generic_script": "The old recording"})
+        output = self.service.generate_generic("nickelodeon", OpenAITTSProvider(FakeOpenAIClient(), model=profile.speech_model))
+        original = dict(self.service.generic_status("nickelodeon"))
+        self.service.update("nickelodeon", {"generic_script": "Replacement script", "voice": "echo"})
+        def fail(_text, _path, **_kwargs):
+            self.assertEqual(self.service.generic_status("nickelodeon")["status"], "generating")
+            self.assertEqual(self.service.generic_audio("nickelodeon"), output)
+            raise RuntimeError("TTS timeout")
+        provider = Mock()
+        provider.synthesize.side_effect = fail
+        with self.assertRaisesRegex(RuntimeError, "TTS timeout"):
+            self.service.generate_generic("nickelodeon", provider)
+        status = self.service.generic_status("nickelodeon")
+        for name in ("audio_path", "profile_fingerprint", "script_text", "provider", "generated_at", "duration_seconds"):
+            self.assertEqual(status[name], original[name])
+        self.assertEqual(status["status"], "failed")
+        self.assertTrue(status["usable"])
+        self.assertTrue(status["needs_update"])
+        self.assertEqual(self.service.generic_audio("nickelodeon"), output)
+        self.assertEqual(list(output.parent.glob("*.partial.wav")), [])
+
+    def test_missing_corrupt_or_oversized_scoped_track_uses_channel_recording(self):
+        provider = OpenAITTSProvider(FakeOpenAIClient(), model="test")
+        channel = self.service.generate_generic("nickelodeon", provider)
+        scoped = self.service.generate_generic("nickelodeon", provider, "night")
+        scoped.unlink()
+        self.assertEqual(self.service.generic_audio("nickelodeon", "night"), channel)
+        scoped.write_bytes(b"not audio")
+        self.assertEqual(self.service.generic_audio("nickelodeon", "night"), channel)
+        scoped = self.service.generate_generic("nickelodeon", provider, "night")
+        malformed = bytearray(scoped.read_bytes())
+        malformed[24:28] = b"\0" * 4  # Invalid zero sample rate.
+        scoped.write_bytes(malformed)
+        self.assertEqual(self.service.generic_audio("nickelodeon", "night"), channel)
+        with wave.open(str(scoped), "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(8000)
+            wav.writeframes(b"\0\0" * 8000 * 31)
+        self.assertEqual(self.service.generic_audio("nickelodeon", "night"), channel)
+
+    def test_relative_paths_relocation_and_exact_orphan_recovery(self):
+        output = self.service.generate_generic("nickelodeon", OpenAITTSProvider(FakeOpenAIClient(), model="test"))
+        self.assertEqual(self.service.generic_status("nickelodeon")["audio_path"], output.name)
+        self.connection.execute("UPDATE announcement_generic_audio SET audio_path=?", (str(self.root / "previous-install" / output.name),))
+        self.connection.commit()
+        self.assertEqual(self.service.generic_audio("nickelodeon"), output)
+        self.assertEqual(self.service.generic_status("nickelodeon")["audio_path"], output.name)
+        self.connection.execute("DELETE FROM announcement_generic_audio")
+        self.connection.commit()
+        self.assertEqual(self.service.generic_audio("nickelodeon"), output)
+        self.assertTrue(self.service.generic_status("nickelodeon")["usable"])
+        output.rename(output.parent / "nickelodeon-arbitrary.wav")
+        self.connection.execute("DELETE FROM announcement_generic_audio")
+        self.connection.commit()
+        self.assertIsNone(self.service.generic_audio("nickelodeon"))
+
+    def test_truncated_wav_is_not_usable(self):
+        output = self.service.generate_generic("nickelodeon", OpenAITTSProvider(FakeOpenAIClient(), model="test"))
+        output.write_bytes(output.read_bytes()[:-100])
+        self.assertIsNone(self.service.generic_audio("nickelodeon"))
+        self.assertFalse(self.service.generic_status("nickelodeon")["usable"])
+
+    def test_successful_replacement_publishes_new_audio_identity(self):
+        provider = OpenAITTSProvider(FakeOpenAIClient(), model="test")
+        old = self.service.generate_generic("nickelodeon", provider)
+        self.service.update("nickelodeon", {"generic_script": "New generic script"})
+        new = self.service.generate_generic("nickelodeon", provider)
+        self.assertNotEqual(old, new)
+        self.assertTrue(old.is_file())
+        self.assertEqual(self.service.generic_audio("nickelodeon"), new)
+        self.assertFalse(self.service.generic_status("nickelodeon")["needs_update"])
+
+    def test_current_legacy_fingerprint_survives_unrelated_profile_edit(self):
+        profile = self.service.profile("nickelodeon")
+        output = self.service.generate_generic("nickelodeon", OpenAITTSProvider(FakeOpenAIClient(), model="test"))
+        self.connection.execute("UPDATE announcement_generic_audio SET profile_fingerprint=?,audio_path=?",
+                                (profile.fingerprint, str(output)))
+        self.connection.commit()
+        self.service.update("nickelodeon", {"enabled": True})
+        status = self.service.generic_status("nickelodeon")
+        self.assertTrue(status["usable"])
+        self.assertFalse(status["needs_update"])
+        self.assertEqual(status["status"], "ready")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required")
+    def test_streamed_wav_with_unknown_length_is_validated_using_actual_payload(self):
+        class StreamedClient(FakeOpenAIClient):
+            def request_bytes(self, path, payload):
+                data = bytearray(super().request_bytes(path, payload))
+                data[4:8] = b"\xff" * 4
+                data[40:44] = b"\xff" * 4
+                return bytes(data)
+        output = self.service.generate_generic("nickelodeon", OpenAITTSProvider(StreamedClient(), model="test"))
+        self.assertEqual(self.service.generic_audio("nickelodeon"), output)
+        self.assertAlmostEqual(self.service.generic_status("nickelodeon")["duration_seconds"], 0.1, places=2)
 
     def test_daypart_profile_has_independent_identity_voice_and_fallback(self):
         daytime = self.service.profile("nickelodeon")

@@ -4,6 +4,10 @@ import uuid
 import hashlib
 import json
 import wave
+import math
+import struct
+import subprocess
+from unittest.mock import Mock
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +30,17 @@ class FakeSpeechProvider:
         if self.error:
             raise RuntimeError(self.error)
         output.write_bytes(b"speech")
+
+
+class ToneGenericProvider:
+    def __init__(self, frequency=440):
+        self.frequency = frequency
+
+    def synthesize(self, text, output, **kwargs):
+        with wave.open(str(output), "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+            wav.writeframes(b"".join(struct.pack("<h", int(10000 * math.sin(2 * math.pi * self.frequency * n / 16000)))
+                                     for n in range(16000)))
 
 
 class UpNextTests(unittest.TestCase):
@@ -488,6 +503,142 @@ class UpNextTests(unittest.TestCase):
             (opportunity_id,),
         ).fetchone()
         self.assertEqual(Path(saved["fallback_path"]), result.output)
+
+    def _fallback_fixture(self):
+        now = utc_now()
+        cursor = self.connection.execute(
+            "INSERT INTO schedule_entries(generation_id,channel_id,starts_at,ends_at,entry_type,title,daypart_slug,sequence_position,is_program) "
+            "VALUES (1,1,'2026-08-03T14:00:00-07:00','2026-08-03T14:00:30-07:00','announcement_opportunity','Up Next','afternoon',99,0)"
+        )
+        facts = json.dumps({"channel": "nickelodeon", "station_identification": False, "listings": []})
+        cursor = self.connection.execute(
+            "INSERT INTO announcement_opportunities(schedule_entry_id,generation_id,channel_id,starts_at,ends_at,facts_json,cache_key,created_at,updated_at) "
+            "VALUES (?,1,1,'2026-08-03T14:00:00-07:00','2026-08-03T14:00:30-07:00',?,?,?,?)",
+            (cursor.lastrowid, facts, hashlib.sha256(facts.encode()).hexdigest(), now, now),
+        )
+        self.connection.commit()
+        renderer = UpNextRenderer(self.connection, self.config, tts_provider=FakeSpeechProvider())
+        renderer._encode = lambda work, ass, audio, output, color, duration, **kwargs: output.write_bytes(b"video")
+        renderer._validate = lambda path, expected_duration=None: float(expected_duration or 30)
+        renderer._audio_duration = lambda path: 1
+        return renderer, cursor.lastrowid
+
+    def test_cached_silent_screen_upgrades_and_replacement_changes_cache(self):
+        renderer, opportunity = self._fallback_fixture()
+        first = renderer.render_opportunity(opportunity, use_tts=False)
+        self.assertEqual(first.audio_mode, "silent")
+        self.assertTrue(renderer.fallback_is_current(opportunity))
+        profiles = AnnouncementProfileService(self.connection, self.config)
+        profiles.generate_generic("nickelodeon", ToneGenericProvider())
+        self.assertFalse(renderer.fallback_is_current(opportunity))
+        spoken = renderer.render_opportunity(opportunity, use_tts=False)
+        self.assertEqual(spoken.audio_mode, "generic")
+        self.assertNotEqual(first.output, spoken.output)
+        self.assertTrue(renderer.fallback_is_current(opportunity))
+        profiles.update("nickelodeon", {"generic_script": "New recording"})
+        # Profile changes alone keep the currently usable recording and video.
+        self.assertTrue(renderer.fallback_is_current(opportunity))
+        profiles.generate_generic("nickelodeon", ToneGenericProvider(880))
+        self.assertFalse(renderer.fallback_is_current(opportunity))
+        replacement = renderer.render_opportunity(opportunity, use_tts=False)
+        self.assertNotEqual(spoken.output, replacement.output)
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM schedule_generations").fetchone()[0], 1)
+
+    def test_ai_failures_leave_generic_ready_without_another_cloud_request(self):
+        renderer, opportunity = self._fallback_fixture()
+        profiles = AnnouncementProfileService(self.connection, self.config)
+        profiles.generate_generic("nickelodeon", ToneGenericProvider())
+        profiles.update("nickelodeon", {"enabled": True})
+        renderer._script_provider = Mock()
+        for error in ("LLM unavailable", "Timeout", "Missing credentials"):
+            renderer._script_provider.generate.side_effect = RuntimeError(error)
+            with self.assertRaisesRegex(RuntimeError, error):
+                renderer.render_opportunity(opportunity, use_tts=True)
+            row = self.connection.execute("SELECT fallback_mode,fallback_path,fallback_reason FROM announcement_opportunities WHERE id=?", (opportunity,)).fetchone()
+            self.assertEqual(row["fallback_mode"], "generic")
+            self.assertTrue(Path(row["fallback_path"]).is_file())
+            self.assertIn(error, row["fallback_reason"])
+        renderer._script_provider.generate.side_effect = None
+        renderer._script_provider.generate.return_value = "Factual dialogue"
+        renderer._tts_provider = FakeSpeechProvider(error="TTS failed")
+        with self.assertRaisesRegex(RuntimeError, "TTS failed"):
+            renderer.render_opportunity(opportunity, use_tts=True)
+        renderer._tts_provider = FakeSpeechProvider()
+        renderer._audio_duration = lambda path: 31 if path.name == "speech.wav" else 1
+        with self.assertRaisesRegex(RuntimeError, "does not fit"):
+            renderer.render_opportunity(opportunity, use_tts=True)
+        self.assertTrue(renderer.fallback_is_current(opportunity))
+        renderer._audio_duration = lambda path: 1
+        result = renderer.render_opportunity(opportunity, use_tts=True)
+        self.assertEqual(result.audio_mode, "ai")
+        self.assertEqual(renderer._tts_provider.text, "Factual dialogue")
+
+    def test_generic_incorporation_failure_is_visible_and_silence_is_last(self):
+        renderer, opportunity = self._fallback_fixture()
+        profiles = AnnouncementProfileService(self.connection, self.config)
+        profiles.generate_generic("nickelodeon", ToneGenericProvider())
+        calls = []
+        def encode(work, ass, audio, output, color, duration, **kwargs):
+            calls.append(audio)
+            if audio:
+                raise RuntimeError("audio encoding failed")
+            output.write_bytes(b"silent video")
+        renderer._encode = encode
+        result = renderer.render_opportunity(opportunity, use_tts=False)
+        self.assertEqual(result.audio_mode, "silent")
+        self.assertIsNotNone(calls[0])
+        self.assertIsNone(calls[1])
+        self.assertIn("audio encoding failed", result.fallback_reason)
+        self.assertTrue(renderer.fallback_is_current(opportunity))
+
+    def test_fallback_preserves_recorded_opportunity_duration(self):
+        renderer, opportunity = self._fallback_fixture()
+        AnnouncementProfileService(self.connection, self.config).generate_generic("nickelodeon", ToneGenericProvider())
+        self.connection.execute("UPDATE announcement_opportunities SET ends_at='2026-08-03T14:00:05-07:00' WHERE id=?", (opportunity,))
+        self.connection.commit()
+        result = renderer.render_opportunity(opportunity, use_tts=False)
+        self.assertEqual(result.duration_seconds, 5)
+        self.assertEqual(result.audio_mode, "generic")
+
+    def test_damaged_generic_video_cache_is_repaired_before_silence(self):
+        renderer, opportunity = self._fallback_fixture()
+        AnnouncementProfileService(self.connection, self.config).generate_generic("nickelodeon", ToneGenericProvider())
+        first = renderer.render_opportunity(opportunity, use_tts=False)
+        first.output.write_bytes(b"broken")
+        def validate(path, expected_duration=None):
+            if path.read_bytes() == b"broken":
+                raise RuntimeError("Broken cached video")
+            return float(expected_duration or 30)
+        renderer._validate = validate
+        self.assertFalse(renderer.fallback_is_current(opportunity))
+        repaired = renderer.render_opportunity(opportunity, use_tts=False)
+        self.assertEqual(repaired.audio_mode, "generic")
+        self.assertFalse(repaired.cached)
+        self.assertTrue(renderer.fallback_is_current(opportunity))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required")
+    def test_generic_audio_survives_real_video_music_mix(self):
+        profiles = AnnouncementProfileService(self.connection, self.config)
+        profiles.generate_generic("nickelodeon", ToneGenericProvider())
+        music = self.root / "media/nickelodeon/graphics/up-next/music.wav"
+        music.parent.mkdir(parents=True)
+        with wave.open(str(music), "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+            wav.writeframes(b"".join(struct.pack("<h", int(5000 * math.sin(2 * math.pi * 120 * n / 16000)))
+                                     for n in range(16000 * 4)))
+        result = UpNextRenderer(self.connection, self.config).render(
+            "nickelodeon", datetime.fromisoformat("2026-08-03T14:10:00-07:00"), use_tts=False, exact_duration=4
+        )
+        self.assertEqual(result.audio_mode, "generic")
+        def rms(start):
+            decoded = subprocess.run([self.config.ffmpeg, "-v", "error", "-ss", str(start), "-i", str(result.output),
+                                      "-t", "0.6", "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+                                     capture_output=True, check=True, timeout=30).stdout
+            values = struct.unpack("<" + "h" * (len(decoded) // 2), decoded)
+            self.assertGreater(len(values), 8000)
+            return math.sqrt(sum(v*v for v in values) / len(values))
+        # Foreground audio occupies the first second; the rest is only quiet music.
+        self.assertGreater(rms(0.1), rms(2) * 5)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required")
     def test_up_next_music_is_mixed_into_silent_visual(self):

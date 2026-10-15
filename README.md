@@ -44,20 +44,39 @@ quality levels. Optional video and audio preparation, automatic aspect analysis,
 and review tools help bring that library into a consistent presentation, while
 deeper controls stay available when you want them.
 
+The guiding idea is **set it up, then let it run**. Once you have arranged your
+channels and added media, CRTV Sim builds schedules from the available
+programming, handles configured weekly specials and holiday seasons, and runs
+enabled video and audio normalization and routine maintenance in the background.
+The goal is a cable TV service you can turn on and watch without continually
+planning its next broadcast.
+
+Weekly Specials, recurring lineups, daypart rules, and other settings give you
+deeper control when you want to customize the experience. For everyday use,
+the program handles the routine decisions automatically. When it cannot
+confidently choose a media correction, the file enters a human review queue
+so you can make the final choice.
+
 New to CRTV Sim? Start with the plain-language
 [Getting Started guide](docs/GETTING_STARTED.md). The rest of this README and the
 other project documents describe the detailed technical design and operation.
 
 ## Requirements
 
+Windows users should download the portable beta from
+[GitHub Releases](https://github.com/pinesal/CRTV-Sim/releases/tag/v0.9.53).
+FFmpeg, FFprobe, mpv and Python are included; no developer setup is needed.
+Start with the [Getting Started guide](docs/GETTING_STARTED.md).
+The requirements and commands below are for running or developing from source.
+
 - Python 3.11 or newer
 - FFmpeg and FFprobe available on `PATH`, or configured explicitly
 - mpv for production playback; FFplay is available as a Windows fallback
 - Windows is the supported development and distribution platform
 
-CRTV Sim itself has no third-party Python dependencies. On Windows, the bundled
-RetroWeather companion installs the small `tzdata` package so IANA forecast
-timezones work inside the shared virtual environment.
+Source installations use the pinned Python packages in `requirements.lock`.
+The RetroWeather companion also uses `tzdata` so IANA forecast timezones work
+on Windows. The portable download includes its runtime dependencies.
 
 ## Companion utilities
 
@@ -562,8 +581,9 @@ Application maintenance automatically regenerates saved schedule dates whose
 configuration fingerprint no longer matches these settings. It also analyzes
 new eligible episodes for natural breakpoints before schedule generation. Run
 the analysis in bounded background-maintenance batches so a large first-time
-library does not prevent the application from starting. Episodes still waiting
-for analysis use the safe midpoint fallback. Run an unlimited analysis directly
+library does not prevent the application from starting. Existing version 5 cuts
+remain usable while they wait for the version 6 analysis. Programs without a
+recorded cut do not receive an invented scheduler breakpoint. Run an unlimited analysis directly
 with:
 
 ```powershell
@@ -572,7 +592,20 @@ retrotv --config config\development.windows.local.toml analyze-breakpoints
 
 Use `set-breakpoint ASSET HH:MM:SS` for a manual override. The browser's
 **Act Breaks** section shows eligible episodes, detection method, confidence,
-and the currently selected timestamp.
+and the currently selected timestamp. Program titles include the series name
+when known and link to the full video for manual review. Browser playback
+depends on the source format; opening the link does not convert the video.
+
+When no qualifying black/fade or supported scene transition is found, the
+enabled fallback policy first tries a fully measured quiet pause of at least
+0.5 seconds below -35 dB in the same target window. It chooses the pause
+midpoint nearest the target, then falls back to the generic midpoint if needed.
+Quiet-pause cuts remain labeled as fallbacks and can be found with **All fallback
+breaks** or **Quiet-pause fallback**; the existing **Generic halfway fallback**
+filter shows midpoint cuts only. Disabling fallbacks disables both types.
+Silence can reduce cuts during speech but does not establish that a scene has
+ended, and background music can hide useful pauses. Analysis errors do not
+produce fallback cuts. Manual choices survive reanalysis.
 
 The browser's **Linear Schedule** section can generate and inspect a channel
 date. The detailed timeline includes interstitials and continuity; **Programs

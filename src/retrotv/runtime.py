@@ -1797,11 +1797,14 @@ class ApplicationRuntime:
             return
         starts = datetime.fromisoformat(row["starts_at"])
         lead = (starts - now).total_seconds()
+        narration_ready = bool(row["validated_output_path"] and Path(row["validated_output_path"]).is_file())
         summary = {
             "id": int(row["id"]),
             "starts_at": row["starts_at"],
             "seconds_away": round(lead, 1),
             "channel": channel,
+            "audio_mode": "ai" if narration_ready else row["fallback_mode"],
+            "fallback_reason": None if narration_ready else row["fallback_reason"],
         }
         dwell_required = float(settings.get("dwell_seconds", 60))
         activity_window = float(settings.get("activity_window_minutes", 120)) * 60
@@ -1810,9 +1813,7 @@ class ApplicationRuntime:
         tts_policy = self._automatic_tts_policy(
             channel, connection, opportunity_id=int(row["id"])
         )
-        fallback_ready = bool(
-            row["fallback_path"] and Path(row["fallback_path"]).is_file()
-        )
+        fallback_ready = UpNextRenderer(connection, self.config).fallback_is_current(int(row["id"]))
         if lead <= maximum_lead and not fallback_ready and not busy:
             thread = threading.Thread(
                 target=self._silent_announcement_worker,
@@ -1825,7 +1826,7 @@ class ApplicationRuntime:
                 self.announcement_state.update(
                     {
                         "next_opportunity": summary,
-                        "eligibility_reason": "Preparing mandatory silent fallback",
+                        "eligibility_reason": "Preparing prerecorded or visual fallback",
                         "generation_state": "rendering-fallback",
                     }
                 )
@@ -1935,12 +1936,16 @@ class ApplicationRuntime:
     def _silent_announcement_worker(self, opportunity_id: int) -> None:
         connection = connect_database(self.config.database_path)
         try:
-            UpNextRenderer(connection, self.config).render_opportunity(
+            result = UpNextRenderer(connection, self.config).render_opportunity(
                 opportunity_id, use_tts=False
             )
             with self.lock:
                 self.announcement_state["generation_state"] = "fallback-ready"
                 self.announcement_state["error"] = None
+                if self.announcement_state.get("next_opportunity"):
+                    self.announcement_state["next_opportunity"].update(
+                        audio_mode=result.audio_mode, fallback_reason=result.fallback_reason
+                    )
         except Exception as exc:
             with self.lock:
                 self.announcement_state["generation_state"] = "failed"
@@ -2317,7 +2322,7 @@ class ApplicationRuntime:
                 self.maintenance["stage"] = "breakpoints"
             if self._maintenance_should_stop():
                 return
-            breakpoints = {"processed": 0, "natural": 0, "midpoint": 0, "errors": 0}
+            breakpoints = {"processed": 0, "natural": 0, "quiet_pause": 0, "midpoint": 0, "errors": 0}
             if bool(self.settings.get("analyze_breakpoints", True)):
                 analyzer = BreakpointAnalyzer(
                     connection, self.config, cancel_event=self.maintenance_cancel_event
@@ -2343,6 +2348,11 @@ class ApplicationRuntime:
                             (result.asset_id,),
                         ).fetchone():
                             breakpoints["midpoint"] += 1
+                        elif connection.execute(
+                            "SELECT 1 FROM asset_break_candidates WHERE asset_id=? AND selected=1 AND method='quiet_pause' LIMIT 1",
+                            (result.asset_id,),
+                        ).fetchone():
+                            breakpoints["quiet_pause"] += 1
                         else:
                             breakpoints["natural"] += 1
                     except ProcessCancelled:

@@ -10,6 +10,7 @@ import subprocess
 import urllib.error
 import urllib.request
 import wave
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -133,6 +134,31 @@ class ChannelAnnouncementProfile:
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
+
+    @property
+    def generic_fingerprint(self) -> str:
+        """Identity of the prerecorded audio, independent of dynamic AI policy."""
+        payload = {
+            "script": self.generic_script,
+            "provider": self.tts_provider,
+            "model": self.breeze_speech_model if self.tts_provider == "breeze" else self.speech_model,
+            "voice": profile_voice(self),
+            "instructions": self.voice_instructions,
+        }
+        return "generic-v1:" + hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+
+@dataclass(frozen=True)
+class GenericRecording:
+    path: Path
+    identity: str
+    duration_seconds: float
+
+
+# Key by file metadata, not profile state. Avoid re-probing on every demand poll.
+_generic_validation_cache: dict[tuple, tuple[GenericRecording | None, str | None]] = {}
 
 
 class OpenAIHTTPClient:
@@ -623,6 +649,12 @@ class AnnouncementProfileService:
         current = self.scoped_profile(
             channel_slug, daypart_slug, weekly_collection_slug
         )
+        # Upgrade a known-current legacy identity before profile_version changes.
+        table, key_column, key_value = self._generic_target(current)
+        self.connection.execute(
+            f"UPDATE {table} SET profile_fingerprint=? WHERE {key_column}=? AND profile_fingerprint=?",
+            (current.generic_fingerprint, key_value, current.fingerprint),
+        )
         maximum_words = max(10, min(150, int(payload.get("maximum_words", current.maximum_words))))
         script_model = str(payload.get("script_model", current.script_model)).strip()
         speech_model = str(payload.get("speech_model", current.speech_model)).strip()
@@ -685,7 +717,7 @@ class AnnouncementProfileService:
             self.connection.execute(
                 """
                 UPDATE announcement_weekly_generic_audio SET
-                    status='stale',detail=NULL,updated_at=?
+                    updated_at=?
                 WHERE profile_id=(SELECT id FROM announcement_weekly_profiles
                     WHERE channel_id=? AND collection_slug=?)
                 """,
@@ -705,7 +737,7 @@ class AnnouncementProfileService:
             self.connection.execute(
                 """
                 UPDATE announcement_daypart_generic_audio SET
-                    status='stale',detail=NULL,updated_at=?
+                    updated_at=?
                 WHERE profile_id=(SELECT id FROM announcement_daypart_profiles
                     WHERE channel_id=? AND daypart_slug=?)
                 """,
@@ -722,7 +754,7 @@ class AnnouncementProfileService:
                 (*values, current.channel_id),
             )
             self.connection.execute(
-                "UPDATE announcement_generic_audio SET status='stale',detail=NULL,updated_at=? WHERE channel_id=?",
+                "UPDATE announcement_generic_audio SET updated_at=? WHERE channel_id=?",
                 (now, current.channel_id),
             )
         table = ("announcement_weekly_profiles" if current.weekly_collection_slug else
@@ -760,9 +792,17 @@ class AnnouncementProfileService:
             (now, current.channel_id, now, *scope_values),
         )
         self.connection.commit()
-        return self.scoped_profile(
+        updated = self.scoped_profile(
             channel_slug, current.daypart_slug, current.weekly_collection_slug
         )
+        table, key_column, key_value = self._generic_target(updated)
+        self.connection.execute(
+            f"UPDATE {table} SET status='stale' WHERE {key_column}=? "
+            "AND status='ready' AND profile_fingerprint<>?",
+            (key_value, updated.generic_fingerprint),
+        )
+        self.connection.commit()
+        return updated
 
     def generic_audio(
         self,
@@ -770,20 +810,131 @@ class AnnouncementProfileService:
         daypart_slug: str | None = None,
         weekly_collection_slug: str | None = None,
     ) -> Path | None:
-        profile = self.profile(
+        recordings, _reason = self.generic_recordings(
             channel_slug, daypart_slug, weekly_collection_slug
         )
-        row = self._generic_row(profile, ready_only=True)
-        # A scoped announcer profile is optional.  If it has no prepared
-        # generic track, retain the station-level prerecorded fallback instead
-        # of dropping straight to music-only Up Next.
-        if row is None or not row["audio_path"]:
-            profile = self._channel_profile(channel_slug)
-            row = self._generic_row(profile, ready_only=True)
-        if row is None or not row["audio_path"]:
-            return None
-        path = Path(row["audio_path"])
-        return path if path.is_file() else None
+        return recordings[0].path if recordings else None
+
+    def validate_generic(self, path: Path, maximum_duration=None) -> tuple[GenericRecording | None, str | None]:
+        maximum = (float(self.settings.get("opportunity_duration_seconds", 30)) - float(
+            self.settings.get("ending_silence_seconds", 1.25)
+        )) if maximum_duration is None else float(maximum_duration)
+        try:
+            stat = path.stat()
+            key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, maximum)
+        except OSError:
+            return None, "Generic recording is missing"
+        if key in _generic_validation_cache:
+            return _generic_validation_cache[key]
+        try:
+            try:
+                with wave.open(str(path), "rb") as audio:
+                    frames = audio.getnframes()
+                    rate = audio.getframerate()
+                    frame_bytes = audio.getnchannels() * audio.getsampwidth()
+                    if rate <= 0 or frame_bytes <= 0:
+                        raise ValueError("Generic WAV has invalid audio parameters")
+                    duration = frames / float(rate)
+                    streamed = frames == 0xFFFFFFFF // frame_bytes
+                    # Reading PCM also detects truncated payloads, without spawning FFmpeg.
+                    expected = frames * frame_bytes
+                    actual = 0
+                    while chunk := audio.readframes(65536):
+                        actual += len(chunk)
+                        if actual > (maximum + 1) * rate * frame_bytes:
+                            raise ValueError("Generic narration exceeds the screen duration")
+                    if actual % frame_bytes or (actual != expected and not streamed):
+                        raise ValueError("Generic WAV is truncated")
+                    if streamed:
+                        duration = actual / float(rate * frame_bytes)
+            except wave.Error:
+                probe = hidden_run(
+                    [self.config.ffprobe, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                    capture_output=True, text=True, timeout=30, check=True,
+                )
+                duration = float(probe.stdout.strip())
+                hidden_run(
+                    [self.config.ffmpeg, "-v", "error", "-xerror", "-i", str(path),
+                     "-map", "0:a:0", "-f", "null", "-"],
+                    capture_output=True, timeout=30, check=True,
+                )
+            if not 0 < duration <= maximum:
+                raise ValueError(f"Generic narration must be between 0 and {maximum:g} seconds")
+            with path.open("rb") as source:
+                identity = hashlib.file_digest(source, "sha256").hexdigest()
+            result = (GenericRecording(path.resolve(), identity, duration), None)
+        except (OSError, ValueError, EOFError, subprocess.SubprocessError) as exc:
+            result = (None, f"Generic recording is unusable: {exc}")
+        if len(_generic_validation_cache) >= 256:
+            _generic_validation_cache.clear()
+        _generic_validation_cache[key] = result
+        return result
+
+    def _usable_generic(self, profile: ChannelAnnouncementProfile, maximum_duration=None):
+        row = self._generic_row(profile, ready_only=False)
+        paths = []
+        if row is not None and row["audio_path"]:
+            stored = Path(row["audio_path"])
+            # Prefer the copy under the current installation after a portable move.
+            paths.append(self._generic_dir() / stored.name)
+            if stored.is_absolute():
+                paths.append(stored)
+        scope = (f"-weekly-{profile.weekly_collection_slug}" if profile.weekly_collection_slug
+                 else f"-{profile.daypart_slug}" if profile.daypart_slug else "")
+        for fingerprint in (profile.generic_fingerprint.split(":")[-1], profile.fingerprint):
+            paths.append(self._generic_dir() / f"{profile.channel_slug}{scope}-{fingerprint[:12]}.wav")
+        seen = set()
+        reason = "No generic recording has been generated"
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            recording, error = self.validate_generic(path, maximum_duration)
+            if recording is None:
+                reason = error or reason
+                continue
+            if row is None or not row["audio_path"] or Path(row["audio_path"]).name != path.name:
+                # Only an exact expected filename can recover an unreferenced recording.
+                table, column, identity = self._generic_target(profile)
+                now = datetime.now().astimezone().isoformat(timespec="seconds")
+                self.connection.execute(
+                    f"INSERT INTO {table}({column},profile_fingerprint,script_text,provider,status,"
+                    "audio_path,duration_seconds,generated_at,updated_at) VALUES (?,?,?,?,'ready',?,?,?,?) "
+                    f"ON CONFLICT({column}) DO UPDATE SET profile_fingerprint=excluded.profile_fingerprint,"
+                    "script_text=excluded.script_text,provider=excluded.provider,status='ready',audio_path=excluded.audio_path,"
+                    "duration_seconds=excluded.duration_seconds,generated_at=excluded.generated_at,updated_at=excluded.updated_at",
+                    (identity, profile.generic_fingerprint, profile.generic_script, profile.tts_provider,
+                     path.name, recording.duration_seconds, now, now),
+                )
+                self.connection.commit()
+            elif path.parent == self._generic_dir() and row["audio_path"] != path.name:
+                table, column, identity = self._generic_target(profile)
+                self.connection.execute(f"UPDATE {table} SET audio_path=? WHERE {column}=?", (path.name, identity))
+                self.connection.commit()
+            return recording, None
+        return None, reason
+
+    def generic_recordings(self, channel_slug, daypart_slug=None, weekly_collection_slug=None, *, maximum_duration=None):
+        active = self.profile(channel_slug, daypart_slug, weekly_collection_slug)
+        profiles = [active]
+        if active.weekly_collection_slug and daypart_slug:
+            daypart = self._daypart_profile(channel_slug, daypart_slug)
+            if daypart is not None:
+                profiles.append(daypart)
+        profiles.append(self._channel_profile(channel_slug))
+        recordings, reasons, seen = [], [], set()
+        for profile in profiles:
+            scope = (profile.daypart_slug, profile.weekly_collection_slug)
+            if scope in seen:
+                continue
+            seen.add(scope)
+            recording, error = self._usable_generic(profile, maximum_duration)
+            if recording and all(recording.identity != item.identity for item in recordings):
+                recordings.append(recording)
+            elif error and not recordings:
+                reasons.append(f"{profile.channel_name}: {error}")
+        return recordings, "; ".join(dict.fromkeys(reasons)) or None
 
     def generic_status(
         self,
@@ -795,7 +946,14 @@ class AnnouncementProfileService:
             channel_slug, daypart_slug, weekly_collection_slug
         )
         row = self._generic_row(profile, ready_only=False)
-        return dict(row) if row else None
+        recording, reason = self._usable_generic(profile)
+        row = self._generic_row(profile, ready_only=False)
+        result = dict(row) if row else {"status": "pending"}
+        result["usable"] = recording is not None
+        result["needs_update"] = bool(row and row["profile_fingerprint"] not in
+                                      {profile.generic_fingerprint, profile.fingerprint})
+        result["availability_reason"] = reason
+        return result
 
     def generate_generic(
         self,
@@ -813,97 +971,37 @@ class AnnouncementProfileService:
             scope = f"-weekly-{profile.weekly_collection_slug}"
         else:
             scope = f"-{profile.daypart_slug}" if profile.daypart_slug else ""
-        target = self._generic_dir() / f"{channel_slug}{scope}-{profile.fingerprint[:12]}.wav"
+        target = self._generic_dir() / f"{channel_slug}{scope}-{profile.generic_fingerprint.split(':')[-1][:12]}.wav"
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(".partial.wav")
+        temporary = target.with_name(f".{target.stem}-{uuid.uuid4().hex}.partial.wav")
         now = datetime.now().astimezone().isoformat(timespec="seconds")
-        if profile.weekly_collection_slug:
-            self.connection.execute(
-                """
-                INSERT INTO announcement_weekly_generic_audio(
-                    profile_id,profile_fingerprint,script_text,provider,status,updated_at
-                ) SELECT id,?,?, ?,'generating',?
-                  FROM announcement_weekly_profiles
-                  WHERE channel_id=? AND collection_slug=?
-                ON CONFLICT(profile_id) DO UPDATE SET
-                    profile_fingerprint=excluded.profile_fingerprint,
-                    script_text=excluded.script_text,provider=excluded.provider,status='generating',
-                    detail=NULL,updated_at=excluded.updated_at
-                """,
-                (
-                    profile.fingerprint, profile.generic_script, profile.tts_provider, now,
-                    profile.channel_id, profile.weekly_collection_slug,
-                ),
-            )
-        elif profile.daypart_slug:
-            self.connection.execute(
-                """
-                INSERT INTO announcement_daypart_generic_audio(
-                    profile_id,profile_fingerprint,script_text,provider,status,updated_at
-                ) SELECT id,?,?, ?,'generating',?
-                  FROM announcement_daypart_profiles
-                  WHERE channel_id=? AND daypart_slug=?
-                ON CONFLICT(profile_id) DO UPDATE SET
-                    profile_fingerprint=excluded.profile_fingerprint,
-                    script_text=excluded.script_text,provider=excluded.provider,status='generating',
-                    detail=NULL,updated_at=excluded.updated_at
-                """,
-                (
-                    profile.fingerprint, profile.generic_script, profile.tts_provider, now,
-                    profile.channel_id, profile.daypart_slug,
-                ),
-            )
-        else:
-            self.connection.execute(
-                """
-                INSERT INTO announcement_generic_audio(
-                    channel_id,profile_fingerprint,script_text,provider,status,updated_at
-                ) VALUES (?,?,?,?,'generating',?)
-                ON CONFLICT(channel_id) DO UPDATE SET
-                    profile_fingerprint=excluded.profile_fingerprint,
-                    script_text=excluded.script_text,provider=excluded.provider,status='generating',
-                    detail=NULL,updated_at=excluded.updated_at
-                """,
-                (profile.channel_id, profile.fingerprint, profile.generic_script, profile.tts_provider, now),
-            )
+        table, key_column, key_value = self._generic_target(profile)
+        self.connection.execute(
+            f"INSERT INTO {table}({key_column},profile_fingerprint,script_text,provider,status,updated_at) "
+            "VALUES (?,?,?,?,'generating',?) "
+            f"ON CONFLICT({key_column}) DO UPDATE SET status='generating',detail=NULL,updated_at=excluded.updated_at",
+            (key_value, profile.generic_fingerprint, profile.generic_script, profile.tts_provider, now),
+        )
         self.connection.commit()
         try:
             tts_provider.synthesize(
                 profile.generic_script, temporary, voice=profile_voice(profile),
                 instructions=profile.voice_instructions, rate=0,
             )
-            with wave.open(str(temporary), "rb") as audio:
-                frames = audio.getnframes()
-                duration = frames / float(audio.getframerate())
-            # Streamed WAV responses can use 0xFFFFFFFF as an unknown data
-            # length. FFprobe reads the actual payload instead of treating that
-            # sentinel as a real frame count.
-            if frames >= 0xFFFFFFFF or duration > 3600:
-                completed = hidden_run(
-                    [
-                        self.config.ffprobe, "-v", "error", "-show_entries",
-                        "format=duration", "-of",
-                        "default=noprint_wrappers=1:nokey=1", str(temporary),
-                    ],
-                    capture_output=True, text=True, timeout=30, check=True,
-                )
-                duration = float(completed.stdout.strip())
-            maximum = float(self.settings.get("opportunity_duration_seconds", 30)) - float(
-                self.settings.get("ending_silence_seconds", 1.25)
-            )
-            if duration > maximum:
-                raise RuntimeError(
-                    f"Generic narration is {duration:.1f}s and must be {maximum:.1f}s or shorter"
-                )
+            recording, error = self.validate_generic(temporary)
+            if recording is None:
+                raise RuntimeError(error)
+            duration = recording.duration_seconds
             os.replace(temporary, target)
             table, key_column, key_value = self._generic_target(profile)
             self.connection.execute(
                 f"""
-                UPDATE {table} SET audio_path=?,status='ready',
+                UPDATE {table} SET audio_path=?,profile_fingerprint=?,script_text=?,provider=?,status='ready',
                     detail=NULL,duration_seconds=?,generated_at=?,updated_at=?
                 WHERE {key_column}=?
                 """,
-                (str(target), duration, now, now, key_value),
+                (target.name, profile.generic_fingerprint, profile.generic_script, profile.tts_provider,
+                 duration, now, now, key_value),
             )
             self.connection.commit()
             return target
@@ -965,9 +1063,9 @@ class AnnouncementProfileService:
 
     def _generic_row(self, profile: ChannelAnnouncementProfile, *, ready_only: bool):
         table, key_column, key_value = self._generic_target(profile)
-        ready = " AND status='ready' AND profile_fingerprint=?" if ready_only else ""
+        ready = " AND status='ready' AND profile_fingerprint IN (?,?)" if ready_only else ""
         values: tuple[Any, ...] = (
-            (key_value, profile.fingerprint) if ready_only else (key_value,)
+            (key_value, profile.generic_fingerprint, profile.fingerprint) if ready_only else (key_value,)
         )
         return self.connection.execute(
             f"SELECT * FROM {table} WHERE {key_column}=?{ready}", values
