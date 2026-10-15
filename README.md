@@ -66,6 +66,12 @@ other project documents describe the detailed technical design and operation.
 Windows users should download the portable beta from
 [GitHub Releases](https://github.com/pinesal/CRTV-Sim/releases/tag/v0.9.53).
 FFmpeg, FFprobe, mpv and Python are included; no developer setup is needed.
+**To use the program, download only `CRTV-Sim-0.9.53-Windows.zip`.**
+The third-party sources, build inputs, checksums and GitHub's automatic source-code
+downloads are optional; none is required to install or run CRTV Sim. Checksums
+are available if you want to verify a download.
+The same release also offers an optional Classic Comedy example channel and
+an optional background music pack.
 Start with the [Getting Started guide](docs/GETTING_STARTED.md).
 The requirements and commands below are for running or developing from source.
 

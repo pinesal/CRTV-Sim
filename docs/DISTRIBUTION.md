@@ -1,5 +1,9 @@
 # CRTV Sim 0.9.53 for Windows
 
+**Only `CRTV-Sim-0.9.53-Windows.zip` is needed to install and run CRTV Sim.**
+Third-party sources, build inputs and checksums are optional downloads. The
+example channel and music pack are also optional extras.
+
 Extract the entire ZIP into a writable folder, such as Documents\CRTV Sim.
 Keep the application directory and bundled **Media** directory together. Open
 the application directory and double-click **CRTV-Sim.exe**. No administrator
@@ -130,15 +134,16 @@ keys, private filenames, network shares and usernames before sharing. Never uplo
 your Credential Manager contents or entire profile as a default diagnostic step.
 
 This is an unsigned distribution. Windows may show SmartScreen prompts.
-Verify the ZIP against its accompanying SHA256 checksum before running it. Hosting,
+Optionally verify the ZIP against its accompanying SHA256 checksum. Hosting,
 code-signing and an independent clean-machine check are separate release steps.
 The packaging process requires matching third-party sources, runtime grant
 evidence and automated media/application smoke checks; see THIRD-PARTY.md.
 
 CRTV Sim is MIT-licensed; bundled FFmpeg, ffprobe, mpv, Python and libraries retain
-their separate terms in licenses/. Obtain the matching **ThirdParty-Sources.zip**
-and its required companion **ThirdParty-Build-Inputs.zip** from the same
-GitHub Release as the Windows ZIP, next to the binary download. Verify all
-downloads with SHA256SUMS.txt. Sources are optional for running the app.
+their separate terms in licenses/. The matching **ThirdParty-Sources.zip**
+and its companion **ThirdParty-Build-Inputs.zip** are available from the same
+GitHub Release as the Windows ZIP for source access and license compliance.
+Neither archive is required to use the app. **SHA256SUMS.txt** is also optional;
+it lets you verify the downloads if you choose.
 A package named INTERNAL is an incomplete development candidate and must not be
 published as a public release. Its manifest lists the remaining source evidence.

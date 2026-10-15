@@ -19,6 +19,15 @@ and review screens let you make the call when an automatic correction is unsure.
 
 ## 1. Install and open CRTV Sim
 
+**Download only `CRTV-Sim-0.9.53-Windows.zip` from
+[the current release](https://github.com/pinesal/CRTV-Sim/releases/tag/v0.9.53)
+to use the program.** Third-party sources, build inputs, checksums and GitHub's
+automatic source-code archives are optional and are not needed to install or run
+CRTV Sim. Checksums let you verify a download if you choose.
+
+The Classic Comedy example channel and background music pack on that release
+are optional extras. Each includes its own installation instructions.
+
 1. Extract the complete CRTV Sim ZIP into a folder you can write to, such as
    **Documents\CRTV Sim**. Do not run it from inside the ZIP file.
 2. Keep the app files and its **Media** folder together. You can instead choose

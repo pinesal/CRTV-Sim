@@ -4,6 +4,10 @@ This beta is intended for Windows 10/11, 64-bit. Extract the entire Windows ZIP
 and open `CRTV-Sim.exe`. Python, FFmpeg, FFprobe and mpv are included.
 Start with [Getting Started](GETTING_STARTED.md) for setup and folder guidance.
 
+**To use CRTV Sim, download only `CRTV-Sim-0.9.53-Windows.zip`.**
+The third-party source archives, build inputs, checksums and GitHub's automatic
+source-code downloads are optional; none is needed to install or run the program.
+
 ## Changes since the earlier private test builds
 
 - Register existing local or network series folders for scheduled channels,
@@ -29,11 +33,22 @@ Start with [Getting Started](GETTING_STARTED.md) for setup and folder guidance.
 
 ## Downloads
 
-Use the Windows ZIP to run CRTV Sim. The two matching source archives contain
-the bundled software's corresponding sources and build inputs; neither is
-required to run the app. Keep all downloads available together.
+**Required download**
 
 - [Windows portable ZIP](https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.53/CRTV-Sim-0.9.53-Windows.zip)
+
+**Optional media extras**
+
+- [Classic Comedy example channel](https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.53/CRTV-Sim-Example-Channel-Classic-Comedy.zip) — four Three Stooges shorts, example station graphics and background music. Follow the included README to add the channel to your media library.
+- [Background music pack](https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.53/CRTV-Sim-Optional-Music-Pack.zip) — music for the Guide, Weather and channel template. Follow the included README for the destination folders.
+
+**Optional sources and download verification**
+
+You do **not** need these files to use CRTV Sim. The source archives are provided
+for developers and bundled-software license compliance; the checksum file is
+only for optional download verification. GitHub's automatic **Source code (zip)**
+and **Source code (tar.gz)** downloads are also optional and are not the Windows app.
+
 - [Third-party sources](https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.53/CRTV-Sim-0.9.53-ThirdParty-Sources.zip)
 - [Third-party build inputs](https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.53/CRTV-Sim-0.9.53-ThirdParty-Build-Inputs.zip)
 - [SHA256 checksums](https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.53/CRTV-Sim-0.9.53-SHA256SUMS.txt)
