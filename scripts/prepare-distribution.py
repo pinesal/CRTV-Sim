@@ -117,6 +117,7 @@ backend = "mpv"
         shutil.rmtree(media)
     scaffold(media)
     shutil.copy2(PROJECT / 'docs/DISTRIBUTION.md', output / 'README-PORTABLE.txt')
+    shutil.copy2(PROJECT / 'CHANGELOG.md', output / 'CHANGELOG.md')
     shutil.copy2(PROJECT / 'docs/PRIVACY-AND-SERVICES.md', output / 'PRIVACY-AND-SERVICES.md')
     shutil.copy2(PROJECT / 'docs/THIRD-PARTY.md', output / 'THIRD-PARTY.md')
     shutil.copy2(PROJECT / 'docs/BUNDLED-SOFTWARE-RELEASE-CHECKLIST.md', output / 'BUNDLED-SOFTWARE-RELEASE-CHECKLIST.md')

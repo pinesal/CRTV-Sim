@@ -20,6 +20,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from retrotv.asset_paths import resolve_asset_path, is_external
+from retrotv.act_break_workshop import ActBreakWorkshop
+from retrotv.act_break_workshop_ui import ACT_BREAK_WORKSHOP_JS
 from retrotv.external_media import ExternalMediaService
 from retrotv.config import AppConfig
 from retrotv import __version__
@@ -45,6 +47,7 @@ from retrotv.settings import SettingsService
 from retrotv.graphics import AUDIO_EXTENSIONS, GRAPHIC_EXTENSIONS, GraphicsService
 from retrotv.graphics_lab import GraphicsLab
 from retrotv.internet_media import InternetMediaService, PreparationService
+from retrotv.inventory_cache import InventoryCache
 from retrotv.restore_point import RestorePointService
 from retrotv.ai_announcements import (
     AnnouncementProfileService,
@@ -738,10 +741,26 @@ INDEX_HTML = """<!doctype html>
       border:1px dashed var(--line); border-radius:6px;
     }
     .preview-status { margin-top:6px; color:var(--muted); font-size:12px; }
+    .act-workshop { width:calc(100vw - 140px); max-width:100%; padding:16px; background:#111923; border:1px solid var(--accent); border-radius:8px; }
+    @media (max-width:600px) { .act-workshop { width:calc(100vw - 80px); } }
+    .act-workshop .workshop-media { max-width:720px; background:#000; }
+    .act-workshop video, .act-workshop img { display:block; width:100%; max-height:440px; object-fit:contain; }
+    .act-workshop [hidden] { display:none !important; }
+    .act-workshop input[type=range] { width:100%; min-width:0; }
+    .act-workshop label { display:block; margin:10px 0 4px; color:var(--muted); }
+    .act-workshop .workshop-controls { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
+    .act-workshop .workshop-controls input { min-width:150px; flex:0 1 180px; }
+    .act-workshop .workshop-markers { position:relative; height:20px; margin:0 10px; }
+    .act-workshop .workshop-markers span { position:absolute; color:var(--accent); font-size:11px; transform:translateX(-50%); }
     button.primary { background:#174b38; border-color:#348965; }
     button:disabled { cursor:not-allowed; opacity:.48; }
     a { color: var(--accent); }
     .inventory-title-link { font-weight: 600; }
+    button.card { text-align:left; font:inherit; }
+    button.card:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    #inventory-reviews-panel { margin:16px 0; padding:14px; border:1px solid var(--line); border-radius:8px; }
+    #inventory-reviews-panel table { min-width:850px; }
+    #inventory-reviews-panel .path { overflow-wrap:anywhere; color:var(--muted); }
     .inventory-shadow-row td { background:rgba(103,150,214,.10); }
     .inventory-shadow-row td:first-child { border-left:4px solid #6796d6; }
     .shadow-badge { display:inline-block; margin-left:8px; padding:2px 7px;
@@ -1031,6 +1050,19 @@ INDEX_HTML = """<!doctype html>
           schedules; future dates without a generated schedule are not included.
           Recurring lineup status is shown separately.</p>
         <section id="inventory-stats" class="stats"></section>
+        <p class="muted">Select Items needing review for the complete file list, including files not shown in the inventory table.</p>
+        <section id="inventory-reviews-panel" hidden tabindex="-1" aria-labelledby="inventory-reviews-heading">
+          <h3 id="inventory-reviews-heading">Items needing review</h3>
+          <p class="muted">Every item counted above: Library review (including long commercials) and shadow review.
+            Aspect, audio, holiday, duplicate, and act-break reviews have their own panels and are not included in this count.</p>
+          <div class="toolbar"><button id="refresh-inventory-reviews">Refresh review list</button>
+            <button id="close-inventory-reviews">Close review list</button></div>
+          <p id="inventory-reviews-status" role="status"></p>
+          <section class="table-wrap"><table>
+            <thead><tr><th>File</th><th>Channel</th><th>Review category</th><th>Reason</th><th>Actions</th></tr></thead>
+            <tbody id="inventory-reviews"></tbody>
+          </table></section>
+        </section>
         <section class="toolbar">
           <input id="inventory-search" placeholder="Search series, movie, channel, or collection">
           <select id="inventory-type"><option value="">All media types</option></select>
@@ -1044,6 +1076,7 @@ INDEX_HTML = """<!doctype html>
           </select>
           <button id="refresh-inventory">Refresh inventory</button>
         </section>
+        <p id="inventory-status" class="muted" role="status">Loading inventory…</p>
         <section class="table-wrap">
           <table>
             <thead><tr><th>Series / Title</th><th>Type</th><th>Items</th><th>Shadows</th>
@@ -1072,7 +1105,7 @@ INDEX_HTML = """<!doctype html>
         <section class="table-wrap">
           <table>
             <thead><tr><th>Status</th><th>Shadow placement</th><th>Real media</th>
-              <th>Channel</th><th>Daypart or Collection</th><th>Detail</th></tr></thead>
+              <th>Channel</th><th>Daypart or Collection</th><th>Detail</th><th>Actions</th></tr></thead>
             <tbody id="shadows"></tbody>
           </table>
           <div id="shadows-empty" class="empty" hidden>No shadow files have been created.</div>
@@ -1380,6 +1413,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
   </main>
+  <script src="/static/act-break-workshop.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const escText = (value) => value == null ? "" : String(value);
@@ -1436,9 +1470,10 @@ INDEX_HTML = """<!doctype html>
       node.className = `notice ${kind}`;
     }
 
-    function card(label, value) {
-      const node = document.createElement("div");
+    function card(label, value, onClick = null) {
+      const node = document.createElement(onClick ? "button" : "div");
       node.className = "card";
+      if (onClick) { node.type = "button"; node.onclick = onClick; }
       const strong = document.createElement("strong");
       strong.textContent = value;
       const span = document.createElement("span");
@@ -1690,15 +1725,18 @@ INDEX_HTML = """<!doctype html>
         body.append(row);
       }
     }
-    async function loadInventory() {
-      inventoryData = await api("/api/inventory");
+    function showInventory(data) {
+      if (data.cache?.ready === false) return;
+      if (inventoryData && data.cache && inventoryData.cache?.revision === data.cache.revision
+          && inventoryData.cache?.updated_at === data.cache.updated_at) return;
+      inventoryData = data;
       const summary = inventoryData.summary;
       $("inventory-stats").replaceChildren(
         card("Series", summary.series), card("Movies", summary.movies),
         card("Complete blocks", summary.blocks), card("Current assets", summary.assets),
         card("Scheduling placements", summary.placements),
         card("Unplaced recurring series", summary.unplaced_recurring || 0),
-        card("Items needing review", summary.review)
+        card("Items needing review", summary.review, () => loadInventoryReviews(true))
       );
       const type = $("inventory-type"); const selectedType = type.value;
       type.replaceChildren(new Option("All media types", ""),
@@ -1709,6 +1747,108 @@ INDEX_HTML = """<!doctype html>
         ...inventoryData.channels.map(value => new Option(value.toUpperCase(), value)));
       channel.value = selectedChannel;
       renderInventory();
+    }
+
+    let inventoryPollTimer = null;
+    let inventoryRequest = 0;
+    async function loadInventory(force = false) {
+      const request = ++inventoryRequest;
+      clearTimeout(inventoryPollTimer);
+      const status = $("inventory-status");
+      const previousTime = inventoryData?.cache?.updated_at;
+      const previousTimestamp = previousTime ? `Last updated ${new Date(previousTime).toLocaleString()}. ` : "";
+      status.textContent = inventoryData
+        ? previousTimestamp + (force ? "Refreshing…" : "Checking for updates…")
+        : "Loading inventory…";
+      let data;
+      try {
+        data = await api(force ? "/api/inventory?refresh=1" : "/api/inventory");
+        if (request !== inventoryRequest) return;
+        showInventory(data);
+        if (!force && data.cache?.refresh_due && !data.cache.refreshing) {
+          status.textContent = data.cache.updated_at
+            ? `Last updated ${new Date(data.cache.updated_at).toLocaleString()}. Refreshing…`
+            : "Loading inventory…";
+          data = await api("/api/inventory?refresh=auto");
+          if (request !== inventoryRequest) return;
+          showInventory(data);
+        }
+        const cache = data.cache;
+        const timestamp = cache?.updated_at ? `Last updated ${new Date(cache.updated_at).toLocaleString()}. ` : "";
+        status.textContent = timestamp + (cache?.error
+          ? `Refresh failed: ${cache.error}. ${inventoryData ? "Showing the last successful results." : "No inventory available yet."} Will retry automatically.`
+          : cache?.refreshing ? "Refreshing…"
+            : cache?.ready === false ? "Waiting for inventory…"
+              : cache?.stale ? "Changes detected; background refresh pending."
+                : "Up to date.");
+      } catch (error) {
+        if (request !== inventoryRequest) return;
+        status.textContent = previousTimestamp + `Could not refresh inventory: ${error.message}. ` +
+          (inventoryData ? "Showing the last successful results." : "Will retry automatically.");
+      }
+      if (request === inventoryRequest) {
+        inventoryPollTimer = setTimeout(() => loadInventory(), data?.cache?.refreshing ? 2000 : 30000);
+      }
+    }
+
+    async function openInventoryReview(item) {
+      try {
+        const section = document.querySelector(
+          `[data-section="${item.kind === "shadow" ? "shadow-files" : "media-library"}"]`
+        );
+        section.open = true;
+        if (item.kind === "shadow") {
+          await loadShadows();
+          const row = $("shadows").querySelector(`[data-shadow-id="${item.id}"]`);
+          if (row) { row.tabIndex = -1; row.focus(); row.scrollIntoView({block:"center"}); }
+          else section.scrollIntoView({block:"start"});
+        } else {
+          $("review").value = "library:open";
+          $("search").value = `id:${item.id}`;
+          await load();
+          section.scrollIntoView({block:"start"});
+          $("search").focus({preventScroll:true});
+        }
+      } catch (error) { notice(error.message, "error"); }
+    }
+    let inventoryReviewRequest = 0;
+    async function loadInventoryReviews(reveal = false) {
+      const request = ++inventoryReviewRequest;
+      const panel = $("inventory-reviews-panel");
+      panel.hidden = false;
+      if (reveal) { panel.focus(); panel.scrollIntoView({block:"start"}); }
+      const status = $("inventory-reviews-status");
+      status.textContent = "Loading review items…";
+      $("inventory-reviews").replaceChildren();
+      try {
+        const data = await api("/api/inventory/reviews");
+        if (request !== inventoryReviewRequest) return;
+        for (const item of data.items) {
+          const row = document.createElement("tr");
+          const file = addCell(row, "");
+          const title = document.createElement("strong"); title.textContent = item.title;
+          const path = document.createElement("div"); path.className = "path"; path.textContent = item.path;
+          file.append(title, path);
+          addCell(row, item.channel_slug || "shared");
+          addCell(row, item.category);
+          const reason = addCell(row, "");
+          for (const detail of item.reasons) {
+            const line = document.createElement("div"); line.textContent = detail; reason.append(line);
+          }
+          const actions = addCell(row, "", "actions");
+          const review = document.createElement("button");
+          review.textContent = item.kind === "shadow" ? "Review shadow" : "Review file";
+          review.onclick = () => openInventoryReview(item); actions.append(review);
+          $("inventory-reviews").append(row);
+        }
+        status.textContent = data.total
+          ? `${data.total} items: ${data.library_count} Library review; ${data.shadow_count} shadow review.`
+          : "No Library or shadow items need review.";
+        const count = $("inventory-stats").querySelector("button.card strong");
+        if (count) count.textContent = data.total;
+      } catch (error) {
+        if (request === inventoryReviewRequest) status.textContent = `Could not load review items: ${error.message}`;
+      }
     }
 
     let shadowData = null;
@@ -1722,8 +1862,11 @@ INDEX_HTML = """<!doctype html>
         });
         const count = Number(shadowDeletePreview.count || 0);
         $("shadow-delete-summary").textContent =
-          `${shadowDeletePreview.title} · ${shadowDeletePreview.channel} · ${shadowDeletePreview.location}. ` +
+          (item.shadow_relative_path
+            ? `${item.shadow_relative_path}. `
+            : `${shadowDeletePreview.title} · ${shadowDeletePreview.channel} · ${shadowDeletePreview.location}. `) +
           `${count} shadow sidecar file${count === 1 ? "" : "s"} will be deleted.`;
+        $("shadow-delete-confirm").textContent = count === 1 ? "Delete shadow" : "Delete shadows";
         $("shadow-delete-dialog").showModal();
       } catch (error) { notice(error.message, "error"); }
     }
@@ -1746,6 +1889,7 @@ INDEX_HTML = """<!doctype html>
           : `Deleted ${removed} shadow files. Original media was untouched; future schedules will rebuild during maintenance.`,
           failures ? "error" : "");
         await Promise.all([loadShadows(), loadInventory()]);
+        if (!$("inventory-reviews-panel").hidden) await loadInventoryReviews();
       } catch (error) { notice(error.message, "error"); }
       finally { $("shadow-delete-confirm").disabled = false; }
     }
@@ -1826,6 +1970,7 @@ INDEX_HTML = """<!doctype html>
       $("shadows-empty").hidden = shadowData.items.length > 0;
       for (const item of shadowData.items) {
         const row = document.createElement("tr");
+        row.dataset.shadowId = item.id;
         addCell(row, item.status, item.status === "ready" ? "status-ready" : "status-open");
         addCell(row, item.shadow_relative_path, "path");
         addCell(row, item.current_target_path || item.target_relative_path, "path");
@@ -1834,6 +1979,15 @@ INDEX_HTML = """<!doctype html>
           ? `${item.collection_type}: ${item.collection_slug}`
           : (item.daypart_slug || "all-day"));
         addCell(row, item.detail || "—");
+        const actions = addCell(row, "", "actions");
+        const deleteButton = document.createElement("button");
+        deleteButton.textContent = "Delete";
+        deleteButton.className = "danger";
+        deleteButton.title = `Delete only this shadow: ${item.shadow_relative_path}`;
+        deleteButton.onclick = () => previewShadowDeletion({
+          shadow_ids: [item.id], shadow_relative_path: item.shadow_relative_path
+        });
+        actions.append(deleteButton);
         body.append(row);
       }
       updateShadowDestination();
@@ -2616,6 +2770,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function loadBreakpoints() {
+      window.ActBreakWorkshopUI?.current?.close();
       const params = new URLSearchParams({limit: "250"});
       if ($("breakpoint-filter").value) params.set("status", $("breakpoint-filter").value);
       const data = await api(`/api/breakpoints?${params}`);
@@ -2658,6 +2813,27 @@ INDEX_HTML = """<!doctype html>
         addCell(row, evidence.join("; ") || item.selected_method || "—");
         addCell(row, item.confidence == null ? "—" : Number(item.confidence).toFixed(2));
         const actions = addCell(row, "", "actions");
+        const targetControls = new Map();
+        const workshopButton = document.createElement("button");
+        workshopButton.textContent = "Open workshop";
+        workshopButton.disabled = !(item.targets || []).length;
+        workshopButton.onclick = () => window.ActBreakWorkshopUI.open(row, item, {
+          api, format:formatBreakpoint,
+          onSaved: updated => {
+            row.children[3].textContent = updated.break_status || "manual";
+            row.children[4].textContent = (updated.selected_evidence || []).map(c => formatBreakpoint(c.offset_ms)).join(", ") || "—";
+            row.children[5].textContent = (updated.selected_evidence || []).map(c => `${formatBreakpoint(c.offset_ms)}: ${c.method}${c.signals?.reason ? `; ${c.signals.reason}` : ""}`).join("; ");
+            row.children[6].textContent = updated.confidence == null ? "—" : Number(updated.confidence).toFixed(2);
+            for (const target of updated.targets || []) {
+              const controls = targetControls.get(target.index);
+              if (!controls) continue;
+              controls.current.textContent = target.selected ? `${formatBreakpoint(target.selected.offset_ms)} — ${target.selected.method}` : "no selected break";
+              controls.manual.value = target.selected ? formatBreakpoint(target.selected.offset_ms) : "";
+              controls.reset.hidden = !target.manual;
+            }
+          }
+        });
+        actions.append(workshopButton);
         const analyze = document.createElement("button"); analyze.textContent = "Analyze";
         analyze.onclick = () => breakpointAction(item.id, {action:"analyze"});
         actions.append(analyze);
@@ -2683,11 +2859,11 @@ INDEX_HTML = """<!doctype html>
             offset_ms:Math.round(seconds * 1000)});
           };
           targetRow.append(label, current, manual, apply);
-          if (target.manual) {
-            const reset = document.createElement("button"); reset.textContent = "Reset";
-            reset.onclick = () => breakpointAction(item.id, {action:"reset", target_index:target.index});
-            targetRow.append(reset);
-          }
+          const reset = document.createElement("button"); reset.textContent = "Reset";
+          reset.hidden = !target.manual;
+          reset.onclick = () => breakpointAction(item.id, {action:"reset", target_index:target.index});
+          targetRow.append(reset);
+          targetControls.set(target.index, {current, manual, reset});
           actions.append(targetRow);
         }
         body.append(row);
@@ -3558,7 +3734,9 @@ INDEX_HTML = """<!doctype html>
         if (button && !button.disabled) button.click();
       }
     });
-    $("refresh-inventory").addEventListener("click", loadInventory);
+    $("refresh-inventory").addEventListener("click", () => loadInventory(true));
+    $("refresh-inventory-reviews").addEventListener("click", () => loadInventoryReviews());
+    $("close-inventory-reviews").addEventListener("click", () => { $("inventory-reviews-panel").hidden = true; });
     $("refresh-bumper-review").addEventListener("click", loadBumperReview);
     $("bumper-review-filter").addEventListener("change", loadBumperReview);
     $("refresh-shadows").addEventListener("click", loadShadows);
@@ -4229,6 +4407,55 @@ def forget_missing_asset_record(
     return max(0, int(detached))
 
 
+def _inventory_reviews(connection: sqlite3.Connection) -> dict[str, object]:
+    """Explain exactly the asset and shadow records counted by inventory.review."""
+    assets: dict[int, dict[str, object]] = {}
+    for row in connection.execute(
+        """
+        SELECT a.id,a.original_filename,a.display_title,a.source_relative_path,
+               a.channel_slug,r.reason_code,r.detail
+        FROM assets a
+        LEFT JOIN review_items r ON r.asset_id=a.id AND r.status='open'
+        WHERE a.review_status='open'
+        ORDER BY a.source_relative_path,a.id,r.id
+        """
+    ):
+        asset_id = int(row["id"])
+        item = assets.setdefault(asset_id, {
+            "kind": "asset", "id": asset_id,
+            "title": row["display_title"] or row["original_filename"],
+            "path": row["source_relative_path"], "channel_slug": row["channel_slug"],
+            "category": "Library review", "reasons": [],
+        })
+        if row["reason_code"] == "long_commercial":
+            item["category"] = "Library review — Long commercial"
+        if row["reason_code"] or row["detail"]:
+            reason = row["detail"] or str(row["reason_code"]).replace("_", " ").capitalize()
+            if reason not in item["reasons"]:
+                item["reasons"].append(reason)
+    for item in assets.values():
+        if not item["reasons"]:
+            item["reasons"].append("Marked for Library review; no recorded reason is available.")
+    shadows = [
+        {
+            "kind": "shadow", "id": int(row["id"]),
+            "title": row["shadow_relative_path"].replace("\\", "/").rsplit("/", 1)[-1],
+            "path": row["shadow_relative_path"], "channel_slug": row["channel_slug"],
+            "category": "Shadow review",
+            "reasons": [row["detail"] or "Shadow file needs review; no recorded reason is available."],
+        }
+        for row in connection.execute(
+            """SELECT id,shadow_relative_path,channel_slug,detail
+               FROM shadow_files WHERE status='review' ORDER BY shadow_relative_path,id"""
+        )
+    ]
+    items = list(assets.values()) + shadows
+    return {
+        "items": items, "total": len(items),
+        "library_count": len(assets), "shadow_count": len(shadows),
+    }
+
+
 def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
     rows = connection.execute(
         """
@@ -4531,10 +4758,35 @@ def _media_inventory(connection: sqlite3.Connection) -> dict[str, object]:
 def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler]:
     database_path = config.database_path
 
+    def build_inventory():
+        with closing(connect_database(database_path)) as connection:
+            connection.execute("BEGIN")
+            return _media_inventory(connection)
+
+    inventory_cache = InventoryCache(database_path, build_inventory)
+    workshop = ActBreakWorkshop(config, stop_event=runtime.stop_event if runtime is not None else None)
+    if runtime is not None:
+        runtime.act_break_workshop = workshop
+
     class Handler(BaseHTTPRequestHandler):
         server_version = f"CRTV-Sim/{__version__}"
 
         def _json(self, payload: object, status: int = 200) -> None:
+            changed_path = urlparse(self.path).path
+            inventory_edit = changed_path.startswith((
+                "/api/assets/", "/api/shadows", "/api/schedule/", "/api/channels",
+                "/api/external-media", "/api/internet-media", "/api/blocks",
+                "/api/programming-rules", "/api/holiday-reviews/", "/api/duplicates",
+                "/api/bumper-cues/",
+            )) or changed_path in {
+                "/api/settings", "/api/runtime/maintenance", "/api/runtime/guide-refresh",
+                "/api/runtime/database-housekeeping", "/api/runtime/database-compact",
+                "/api/runtime/normalization-review", "/api/runtime/normalization-batch",
+                "/api/runtime/audio-analysis", "/api/runtime/audio-normalization",
+                "/api/runtime/internet-cache-empty",
+            }
+            if self.command == "POST" and 200 <= status < 300 and inventory_edit and not changed_path.endswith("/act-break-workshop"):
+                inventory_cache.invalidate()
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -4624,6 +4876,33 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/static/act-break-workshop.js":
+                body = ACT_BREAK_WORKSHOP_JS.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            workshop_parts = parsed.path.strip("/").split("/")
+            if len(workshop_parts) in {4, 6} and workshop_parts[:2] == ["api", "assets"] and workshop_parts[3] == "act-break-workshop":
+                try:
+                    asset_id = int(workshop_parts[2])
+                    if len(workshop_parts) == 4:
+                        session_id = parse_qs(parsed.query).get("session_id", [""])[0]
+                        self._json(workshop.status(asset_id, session_id))
+                    else:
+                        path = workshop.artifact(asset_id, workshop_parts[4], workshop_parts[5])
+                        if path.suffix == ".mp4":
+                            self._video_file(path)
+                        else:
+                            self._file(path, "image/jpeg")
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    self._json({"error": str(exc)}, 400)
+                return
             if parsed.path in {"/api/weather-graphics", "/api/weather-graphics/file"}:
                 try:
                     from retrotv.weather_graphics import WeatherGraphicsService, sync_weather_holidays
@@ -4988,9 +5267,15 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     result = DuplicateService(connection, config).groups()
                 self._json(result)
                 return
+            if parsed.path == "/api/inventory/reviews":
+                with closing(connect_database(database_path)) as connection:
+                    result = _inventory_reviews(connection)
+                self._json(result)
+                return
             if parsed.path == "/api/inventory":
-                with connect_database(database_path) as connection:
-                    result = _media_inventory(connection)
+                params = parse_qs(parsed.query)
+                mode = params.get("refresh", [""])[0]
+                result = inventory_cache.get("force" if mode == "1" else "auto" if mode == "auto" else "")
                 self._json(result)
                 return
             if parsed.path == "/api/shadows":
@@ -5013,6 +5298,13 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                 minimum_seconds = float(settings.get("midroll_min_media_minutes", 15)) * 60
                 where = ["a.media_type IN ('episode','movie')", "m.duration_seconds > ?"]
                 values: list[object] = [minimum_seconds]
+                if params.get("asset_id"):
+                    try:
+                        values.append(int(params["asset_id"][0]))
+                    except ValueError:
+                        self._json({"error": "Invalid asset ID"}, 400)
+                        return
+                    where.append("a.id=?")
                 if status == "pending":
                     where.append(f"""(b.asset_id IS NULL OR b.status IN ('pending','error') OR
                         b.source_signature != CAST(a.file_size AS TEXT) || ':' ||
@@ -5370,6 +5662,19 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+            workshop_parts = parsed.path.strip("/").split("/")
+            if len(workshop_parts) == 4 and workshop_parts[:2] == ["api", "assets"] and workshop_parts[3] == "act-break-workshop":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 16384:
+                        raise ValueError("Invalid workshop request size")
+                    payload = json.loads(self.rfile.read(length))
+                    if not isinstance(payload, dict):
+                        raise ValueError("Workshop request must be an object")
+                    self._json(workshop.request(int(workshop_parts[2]), payload))
+                except (ValueError, TypeError, OverflowError, OSError, sqlite3.Error) as exc:
+                    self._json({"error": str(exc)}, 400)
+                return
             if parsed.path == "/api/external-media" or parsed.path.startswith("/api/external-media/"):
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
@@ -6574,9 +6879,11 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
             if parts[3] == "breakpoint":
                 action = payload.get("action")
                 try:
-                    with connect_database(database_path) as connection:
+                    with closing(connect_database(database_path)) as connection:
                         service = BreakpointAnalyzer(connection, config)
-                        if action == "analyze":
+                        if payload.get("workshop_session") and action in {"manual", "reset"}:
+                            result = workshop.save(connection, asset_id, payload)
+                        elif action == "analyze":
                             result = service.analyze_asset(asset_id)
                         elif action == "manual":
                             result = service.set_manual(
@@ -6594,7 +6901,7 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                         "method": result.method,
                         "confidence": result.confidence,
                     }
-                except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                except (ValueError, TypeError, OverflowError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
                     self._json({"error": str(exc)}, 400)
                     return
                 self._json(response)
@@ -6869,6 +7176,7 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
         def log_message(self, format: str, *args: object) -> None:
             print(f"[web] {self.address_string()} - {format % args}")
 
+    Handler.close_workshop = staticmethod(workshop.close)
     return Handler
 
 
@@ -6906,5 +7214,8 @@ def serve(
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        try:
+            server.RequestHandlerClass.close_workshop()
+        finally:
+            server.server_close()
 

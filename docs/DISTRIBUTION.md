@@ -1,8 +1,9 @@
-# CRTV Sim 0.9.53 for Windows
+# CRTV Sim 0.9.55 for Windows
 
-**Only `CRTV-Sim-0.9.53-Windows.zip` is needed to install and run CRTV Sim.**
+**Only `CRTV-Sim-0.9.55-Windows.zip` is needed to install and run CRTV Sim.**
 Third-party sources, build inputs and checksums are optional downloads. The
 example channel and music pack are also optional extras.
+The application folder includes `CHANGELOG.md` describing the latest changes.
 
 Extract the entire ZIP into a writable folder, such as Documents\CRTV Sim.
 Keep the application directory and bundled **Media** directory together. Open

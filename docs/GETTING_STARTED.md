@@ -19,8 +19,8 @@ and review screens let you make the call when an automatic correction is unsure.
 
 ## 1. Install and open CRTV Sim
 
-**Download only `CRTV-Sim-0.9.53-Windows.zip` from
-[the current release](https://github.com/pinesal/CRTV-Sim/releases/tag/v0.9.53)
+**Download only `CRTV-Sim-0.9.55-Windows.zip` from
+[the current release](https://github.com/pinesal/CRTV-Sim/releases/tag/v0.9.55)
 to use the program.** Third-party sources, build inputs, checksums and GitHub's
 automatic source-code archives are optional and are not needed to install or run
 CRTV Sim. Checksums let you verify a download if you choose.
@@ -176,6 +176,30 @@ tab, then use the manual timestamp controls to choose a better break. Some
 source formats may need an external video player rather than browser playback.
 No source file is split or edited by choosing a breakpoint.
 
+Choose **Open workshop** on an Act Breaks entry to work inside the panel. Only
+one workshop is open at a time. Select the break to adjust, scrub the full-program
+or loaded-preview timeline, use the five-second jumps, or enter a timestamp and
+choose **Go to timestamp**. **Previous Frame** and **Next Frame** select actual
+source frames, including for variable-frame-rate videos. Short temporary clips
+are generated only when you press Play, so browser-incompatible source formats
+can also be reviewed. Scrubbing and frame stepping fetch source frames directly;
+they do not wait for a video clip to be encoded. Nearby seeks reuse frame timings
+and loaded playback clips. Playback previews cover about 20 seconds at a time.
+
+**Play around this point** lets you listen before and after a candidate.
+**Place Act Break** saves the verified frame boundary: commercials begin before
+that frame and the program resumes with it. Browsing alone does not change the
+saved cut. **Reset to automatic** restores the automatic choice. Corrected
+entries remain visible under fallback filters until you refresh or change the
+filter. The existing typed timestamp controls remain available if previews fail.
+The normal number of break targets and spacing rules still apply; the scheduler
+may omit a pod when there is insufficient time or advertising to fill it.
+
+Previews use the same working video as act-break analysis. They do not change
+managed or external source files. If that video changes during review, reopen
+the workshop before saving. Inactive workshop previews expire through temporary
+file cleanup; open workshops retain their previews while connected.
+
 If no strong natural cue is found, enabled fallbacks try a sustained quiet pause
 before the generic midpoint. These cuts are labeled **Quiet-pause fallback** and
 remain available for optional manual review. Use **All fallback breaks** to see
@@ -297,6 +321,22 @@ dates that have not been generated yet are not included. Choose **No upcoming
 programs** to find these entries. The separate **Recurring Lineup** column shows
 saved recurring assignments, including regular slots preserved during holiday
 rotation. Use **Refresh inventory** after background schedule generation.
+
+Inventory results are reused between page visits while CRTV Sim stays running.
+The last successful results remain visible during background refreshes, along
+with a **Last updated** timestamp and refresh status. **Refresh inventory**
+requests an immediate update. The first inventory load after restarting CRTV Sim
+can still take longer; a failed refresh keeps the previous results available.
+
+Click **Items needing review** in Programming Inventory for a complete list of
+the files behind that count, their review categories, and recorded reasons.
+The count includes Library review (including long commercials) and shadow
+review, even when a file is unclassified or its shadow target is missing.
+Use **Review file** or **Review shadow** to jump to that item's review controls.
+Individual shadows can be deleted from the Shadow Files panel after confirming
+the exact path; this removes only the shadow sidecar, leaving original media
+and other shadow placements untouched. Aspect, audio, holiday, duplicate, and
+act-break reviews are separate and are not included in this inventory count.
 
 Reconnect the drive that contains your library, then use **Scan & update now**.
 If a new channel or file is still missing, check that it is under the correct

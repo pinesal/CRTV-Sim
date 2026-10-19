@@ -15,6 +15,25 @@ from retrotv.db import utc_now
 from retrotv.process_control import ProcessCancelled, run_cancellable
 
 
+def resolve_breakpoint_media(connection, config, asset_id: int) -> Path:
+    """Resolve the same working representation for analysis and its workshop."""
+    row = connection.execute(
+        "SELECT proxy_status,proxy_relative_path FROM normalization_profiles WHERE asset_id=?",
+        (asset_id,),
+    ).fetchone()
+    if not is_external(connection, asset_id) and row is not None and row["proxy_status"] == "ready" and row["proxy_relative_path"]:
+        root = config.storage_root("normalized").resolve()
+        proxy = (root / row["proxy_relative_path"]).resolve()
+        if not proxy.is_relative_to(root):
+            raise ValueError("Working video path escapes its storage root")
+        if proxy.is_file():
+            return proxy
+    source = resolve_asset_path(connection, config, asset_id)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    return source
+
+
 @dataclass(frozen=True)
 class BreakpointResult:
     asset_id: int
@@ -377,14 +396,7 @@ class BreakpointAnalyzer:
         )
 
     def _playback_path(self, row) -> Path:
-        if not is_external(self.connection, row["id"]) and row["proxy_status"] == "ready" and row["proxy_relative_path"]:
-            proxy = self.config.storage_root("normalized") / Path(row["proxy_relative_path"])
-            if proxy.is_file():
-                return proxy
-        source = resolve_asset_path(self.connection, self.config, row["id"])
-        if not source.is_file():
-            raise FileNotFoundError(source)
-        return source
+        return resolve_breakpoint_media(self.connection, self.config, int(row["id"]))
 
     def _run_detection(self, source: Path, start_ms: int, end_ms: int) -> str:
         duration = max(0.1, (end_ms - start_ms) / 1000)

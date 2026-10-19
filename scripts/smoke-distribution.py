@@ -14,7 +14,7 @@ import zipfile
 from urllib.request import Request, urlopen
 
 PROJECT = Path(__file__).resolve().parents[1]
-BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.53'
+BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.55'
 ROOT = PROJECT / '.test-tmp/Frozen distributión with spaces final'
 
 
@@ -140,6 +140,28 @@ def check_frozen_tv():
     print('Frozen channel scan, schedule creation, Guide listings/rendering, episode playback and Guide tuning passed')
 
 
+def check_frozen_workshop():
+    guide = json.loads(api('/api/guide'))
+    channel = next(c for c in guide['channels'] if c['slug'] == 'smoke-tv')
+    route = f"/api/assets/{channel['now']['asset_id']}/act-break-workshop"
+    started = time.monotonic()
+    state = json.loads(api(route, {'action': 'preview', 'offset_ms': 600000}))
+    session = state['session_id']
+    try:
+        while state['state'] in {'queued', 'running'} and time.monotonic() - started < 30:
+            time.sleep(.1)
+            state = json.loads(api(route + '?session_id=' + session))
+        assert state['state'] == 'ready', state
+        assert state['result']['clip_token'] is None, state
+        assert state['result']['offset_ms'] == 600000, state
+        with urlopen('http://127.0.0.1:8765' + state['result']['frame_url'], timeout=10) as response:
+            assert response.headers['Content-Type'].startswith('image/jpeg')
+            assert response.read().startswith(b'\xff\xd8')
+        print(f'Frozen workshop scrub returned an exact frame without video encoding ({time.monotonic()-started:.2f}s)')
+    finally:
+        api(route, {'action': 'close', 'session_id': session})
+
+
 def main():
     with socket.socket() as connection:
         connection.settimeout(1)
@@ -186,6 +208,14 @@ def main():
         assert fields['normalization.canvas_width']==1920
         print('Frozen setup committed before scanning; Dashboard/settings available')
         check_frozen_tv()
+        workshop_script = api('/static/act-break-workshop.js')
+        assert 'Place Act Break' in workshop_script
+        check_frozen_workshop()
+        inventory = json.loads(api('/api/inventory'))
+        assert inventory['cache']['ready'], inventory
+        reviews = json.loads(api('/api/inventory/reviews'))
+        assert isinstance(reviews, dict), reviews
+        print('Frozen workshop controls, inventory cache and review endpoint available')
         assert hashlib.sha256(video.read_bytes()).hexdigest() == source_hash
         stop(process)
         overlay=ROOT/'user-data/config/portable.windows.settings.json'

@@ -62,6 +62,7 @@ class GeneratedAssetCleanup:
         self._prune_temporary_files(
             summary, protected, moment, temporary_hours * 3600
         )
+        self._prune_act_break_previews(summary, protected, moment, temporary_hours * 3600)
         self._prune_guides(summary, protected)
         self._prune_announcements(summary, protected, moment)
         self._prune_graphics(summary, protected, moment)
@@ -137,6 +138,27 @@ class GeneratedAssetCleanup:
                     self._remove_if_old(
                         candidate, summary, protected, now, maximum_age
                     )
+
+    def _prune_act_break_previews(self, summary, protected, now, maximum_age):
+        base = self.config.storage_root("previews").resolve()
+        root = (base / "act-breaks").resolve()
+        if not root.is_relative_to(base) or not root.is_dir():
+            return
+        for directory in root.iterdir():
+            if (not directory.is_dir() or directory.is_symlink()
+                    or len(directory.name) != 64 or any(c not in "0123456789abcdef" for c in directory.name)):
+                continue
+            lease = directory / ".lease"
+            try:
+                if now - (lease.stat().st_mtime if lease.is_file() else directory.stat().st_mtime) < maximum_age:
+                    continue
+                for path in directory.iterdir():
+                    if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(root):
+                        self._remove(path, summary, protected)
+                if not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError as exc:
+                summary.errors.append(f"{directory}: {exc}")
 
     def _prune_guides(
         self, summary: CleanupSummary, protected: set[Path]

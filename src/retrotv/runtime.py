@@ -483,6 +483,9 @@ class ApplicationRuntime:
         return result
 
     def _wait_for_background_writers(self) -> None:
+        workshop = getattr(self, "act_break_workshop", None)
+        if workshop is not None:
+            workshop.close()
         current = threading.current_thread()
         threads = (
             ("shutdown control", self.shutdown_request_thread),

@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 from retrotv.config import AppConfig
 from retrotv.web import (
     DASHBOARD_HTML, INDEX_HTML, INTERNET_MEDIA_HTML, SETTINGS_HTML, _asset_query, _media_inventory,
-    forget_missing_asset_record, serve,
+    _inventory_reviews, forget_missing_asset_record, serve,
 )
 
 
@@ -27,6 +27,228 @@ def add_storage_fixture(connection):
 
 
 class WebLibraryTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node required for Dashboard behavior check')
+    def test_inventory_shows_cache_during_refresh_and_preserves_it_on_failure(self):
+        start = INDEX_HTML.index('function showInventory(data)')
+        end = INDEX_HTML.index('async function openInventoryReview(item)', start)
+        script = r'''
+          const assert=require('assert');
+          function element(){return {value:'',children:[],append(...nodes){this.children.push(...nodes)},
+            replaceChildren(...nodes){this.children=nodes}};}
+          const elements={};const $=name=>elements[name] ||= element();
+          function Option(text,value){return {text,value};}
+          function card(){return element();}
+          function inventoryTypeLabel(value){return value;}
+          let rendered=0,inventoryData=null,timerDelay;
+          function renderInventory(){rendered++;}
+          function loadInventoryReviews(){}
+          const setTimeout=(_fn,delay)=>{timerDelay=delay;return 1},clearTimeout=()=>{};
+          const calls=[];let release,broken=false;
+          const original={summary:{review:15},media_types:['episode'],channels:['nick'],items:[{title:'Old show'}],
+            cache:{ready:true,revision:1,updated_at:'2026-10-15T20:00:00Z',stale:true,refresh_due:true,refreshing:false}};
+          const fresh={...original,items:[{title:'New show'}],cache:{...original.cache,revision:2,updated_at:'2026-10-15T20:01:00Z',stale:false,refresh_due:false}};
+          async function api(path){
+            calls.push(path);
+            if(broken)throw Error('network unavailable');
+            if(path==='/api/inventory?refresh=auto')return new Promise(resolve=>release=resolve);
+            if(path==='/api/inventory?refresh=1')return fresh;
+            return original;
+          }
+        ''' + INDEX_HTML[start:end] + r'''
+          (async()=>{
+            const pending=loadInventory();
+            await Promise.resolve();await Promise.resolve();
+            assert.strictEqual(rendered,1);
+            assert.strictEqual(inventoryData.items[0].title,'Old show');
+            assert.ok($('inventory-status').textContent.includes('Refreshing'));
+            assert.strictEqual($('inventory-type').value,'');
+            $('inventory-type').value='episode';$('inventory-channel').value='nick';
+            release(fresh);await pending;
+            assert.strictEqual(inventoryData.items[0].title,'New show');
+            assert.strictEqual($('inventory-type').value,'episode');
+            assert.strictEqual($('inventory-channel').value,'nick');
+            assert.ok($('inventory-status').textContent.includes('Last updated'));
+            assert.strictEqual(timerDelay,30000);
+            const before=rendered;
+            await loadInventory(true);
+            assert.strictEqual(calls.at(-1),'/api/inventory?refresh=1');
+            assert.strictEqual(rendered,before);
+            broken=true;await loadInventory(true);
+            assert.strictEqual(inventoryData.items[0].title,'New show');
+            assert.strictEqual(rendered,before);
+            assert.ok($('inventory-status').textContent.includes('last successful results'));
+            assert.ok($('inventory-status').textContent.includes('Last updated'));
+          })().catch(error=>{console.error(error);process.exitCode=1});
+        '''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True,
+                                encoding='utf-8', timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_inventory_review_list_counts_files_instead_of_reasons_and_includes_broken_records(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        self.addCleanup(connection.close)
+        connection.executescript("""
+            CREATE TABLE assets(id INTEGER PRIMARY KEY,original_filename TEXT,
+                display_title TEXT,source_relative_path TEXT,channel_slug TEXT,
+                review_status TEXT,integrity_status TEXT,media_type TEXT);
+            CREATE TABLE review_items(id INTEGER PRIMARY KEY,asset_id INTEGER,
+                status TEXT,reason_code TEXT,detail TEXT);
+            CREATE TABLE shadow_files(id INTEGER PRIMARY KEY,shadow_relative_path TEXT,
+                channel_slug TEXT,detail TEXT,status TEXT);
+            INSERT INTO assets VALUES
+                (1,'long.mp4','Long ad','shared/all-day/commercials/long.mp4',NULL,'open','ready','commercial'),
+                (2,'unknown.mp4',NULL,'fox/bad/unknown.mp4','fox','open','error',NULL),
+                (3,'missing.mp4',NULL,'fox/night/missing.mp4','fox','open','missing',NULL),
+                (4,'ready.mp4','Ready','fox/night/ready.mp4','fox','ready','ready','episode');
+            INSERT INTO review_items VALUES
+                (1,1,'open','long_commercial','Commercial is 10 minutes; threshold is 3 minutes'),
+                (2,2,'open','unknown_daypart','Unknown daypart: bad'),
+                (3,2,'open','probe_failed','Could not decode video'),
+                (4,2,'resolved','old_reason','Old reason must not appear'),
+                (5,4,'open','stale_reason','Ready assets are not counted');
+            INSERT INTO shadow_files VALUES
+                (1,'nick/night/episodes/missing.mp4.shadow','nick','Target media was not found','review'),
+                (2,'nick/night/episodes/ready.mp4.shadow','nick',NULL,'ready');
+        """)
+        result = _inventory_reviews(connection)
+        self.assertEqual((result['total'], result['library_count'], result['shadow_count']), (4, 3, 1))
+        counted = connection.execute("""SELECT
+            (SELECT COUNT(*) FROM assets WHERE review_status='open') +
+            (SELECT COUNT(*) FROM shadow_files WHERE status='review')""").fetchone()[0]
+        self.assertEqual(result['total'], counted)
+        items = {(item['kind'], item['id']): item for item in result['items']}
+        self.assertIn('Long commercial', items[('asset', 1)]['category'])
+        self.assertEqual(items[('asset', 2)]['reasons'],
+                         ['Unknown daypart: bad', 'Could not decode video'])
+        self.assertEqual(items[('asset', 2)]['title'], 'unknown.mp4')
+        self.assertIn('no recorded reason', items[('asset', 3)]['reasons'][0])
+        self.assertEqual(items[('shadow', 1)]['reasons'], ['Target media was not found'])
+        connection.execute("UPDATE assets SET review_status='ready'")
+        connection.execute("UPDATE shadow_files SET status='ready'")
+        empty = _inventory_reviews(connection)
+        self.assertEqual(empty, {'items': [], 'total': 0, 'library_count': 0, 'shadow_count': 0})
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for Dashboard behavior check')
+    def test_inventory_review_card_opens_complete_list_and_routes_to_correct_review(self):
+        card_start = INDEX_HTML.index('function card(label, value,')
+        card_end = INDEX_HTML.index('async function loadStats()', card_start)
+        start = INDEX_HTML.index('function showInventory(data)')
+        end = INDEX_HTML.index('let shadowData = null;', start)
+        script = r'''
+          const assert=require('assert');
+          const setTimeout=()=>1,clearTimeout=()=>{};
+          function element(tag){return {tag,children:[],value:'',hidden:true,dataset:{},
+            append(...nodes){this.children.push(...nodes)},
+            replaceChildren(...nodes){this.children=nodes},focus(){this.focused=true},
+            scrollIntoView(){this.scrolled=true},querySelector(){return count}};}
+          const elements={};const $=name=>elements[name] ||= element(name);
+          const sections={'media-library':element('section'),'shadow-files':element('section')};
+          const document={createElement:element,querySelector(selector){return sections[selector.match(/data-section="([^"]+)"/)[1]]}};
+          function Option(text,value){return {text,value};}
+          function addCell(row,text){const cell=element('td');cell.textContent=text;row.append(cell);return cell;}
+          function notice(text,kind){if(kind==='error')throw Error(text);}
+          function renderInventory(){}
+          let inventoryData,selectedId,loaded=0,shadowsLoaded=0,fail=false;
+          async function load(){loaded++;selectedId=$('search').value;}
+          async function loadShadows(){shadowsLoaded++;}
+          const count=element('strong');
+          const items=[{kind:'asset',id:5,title:'Ad',path:'shared/all-day/commercials/ad.mp4',category:'Long commercial',reasons:['Longer than 3 minutes']},
+            {kind:'shadow',id:9,title:'gone.mp4.shadow',path:'nick/night/gone.mp4.shadow',category:'Shadow review',reasons:['Target media was not found']}];
+          async function api(path){
+            if(path==='/api/inventory')return {summary:{review:2},media_types:[],channels:[]};
+            assert.strictEqual(path,'/api/inventory/reviews');
+            if(fail)throw Error('offline');
+            return {items,total:2,library_count:1,shadow_count:1};
+          }
+        ''' + INDEX_HTML[card_start:card_end] + INDEX_HTML[start:end] + r'''
+          (async()=>{
+            await loadInventory();
+            const button=$('inventory-stats').children[6];
+            assert.strictEqual(button.tag,'button');assert.strictEqual(button.type,'button');
+            await button.onclick();
+            assert.strictEqual($('inventory-reviews-panel').hidden,false);
+            assert.strictEqual($('inventory-reviews-panel').focused,true);
+            assert.strictEqual(count.textContent,2);
+            const rows=$('inventory-reviews').children;assert.strictEqual(rows.length,2);
+            assert.strictEqual(rows[1].children[0].children[1].textContent,items[1].path);
+            assert.strictEqual(rows[1].children[3].children[0].textContent,'Target media was not found');
+            await rows[0].children[4].children[0].onclick();
+            assert.strictEqual(selectedId,'id:5');assert.strictEqual($('review').value,'library:open');
+            assert.strictEqual(sections['media-library'].open,true);assert.strictEqual(loaded,1);
+            await rows[1].children[4].children[0].onclick();
+            assert.strictEqual(sections['shadow-files'].open,true);assert.strictEqual(shadowsLoaded,1);
+            assert.strictEqual(count.focused,true);
+            fail=true;await loadInventoryReviews();
+            assert.strictEqual($('inventory-reviews').children.length,0);
+            assert.ok($('inventory-reviews-status').textContent.includes('Could not load review items: offline'));
+          })().catch(error=>{console.error(error);process.exitCode=1});
+        '''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True,
+                                encoding='utf-8', timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for Dashboard behavior check')
+    def test_individual_shadow_delete_previews_exact_file_before_deletion(self):
+        start = INDEX_HTML.index('let shadowData = null;')
+        end = INDEX_HTML.index('function updateShadowDestination()', start)
+        load_start = INDEX_HTML.index('async function loadShadows()')
+        load_end = INDEX_HTML.index('function byteSize(', load_start)
+        script = r'''
+          const assert = require('assert');
+          function element(tag) { return {tag,children:[],value:'',dataset:{},hidden:true,
+            get options(){return this.children},
+            append(...nodes){this.children.push(...nodes)},
+            replaceChildren(...nodes){this.children=nodes},
+            showModal(){this.open=true},close(){this.open=false}}; }
+          const elements = {};
+          const $ = name => elements[name] ||= element(name);
+          const document = {createElement:element};
+          function Option(text,value){return {text,value};}
+          function card(){return element('card');}
+          function addCell(row,text){const cell=element('td');cell.textContent=text;row.append(cell);return cell;}
+          function updateShadowDestination(){}
+          let inventoryRefreshes=0;
+          async function loadInventory(){inventoryRefreshes++;}
+          let reviewRefreshes=0;
+          async function loadInventoryReviews(){reviewRefreshes++;}
+          function notice(text,kind){if(kind==='error')throw Error(text);}
+          const calls=[];
+          const items=[
+            {id:11,status:'ready',shadow_relative_path:'fox/night/episodes/one.mp4.shadow'},
+            {id:12,status:'review',shadow_relative_path:'nick/night/episodes/missing.mp4.shadow',detail:'Target media was not found'}
+          ];
+          async function api(path,options){
+            const payload=options ? JSON.parse(options.body) : null;
+            calls.push({path,payload});
+            if(path==='/api/shadows')return {items,summary:{total:2,ready:1,review:1},options:{channels:[]},folders:[]};
+            if(path==='/api/shadows/deletion-preview')return {shadow_ids:payload.shadow_ids,count:1,token:'preview-token'};
+            if(path==='/api/shadows/delete')return {deleted:[items[1].shadow_relative_path],already_missing:[],failed:[]};
+            throw Error('Unexpected endpoint: '+path);
+          }
+        ''' + INDEX_HTML[start:end] + INDEX_HTML[load_start:load_end] + r'''
+          (async()=>{
+            await loadShadows();
+            const rows=$('shadows').children;
+            assert.strictEqual(rows.length,2);
+            assert.strictEqual(rows[0].children[6].children[0].textContent,'Delete');
+            await rows[1].children[6].children[0].onclick();
+            assert.strictEqual($('shadow-delete-dialog').open,true);
+            assert.ok($('shadow-delete-summary').textContent.includes(items[1].shadow_relative_path));
+            assert.deepStrictEqual(calls[1].payload,{shadow_ids:[12]});
+            assert.ok(!calls.some(call=>call.path==='/api/shadows/delete'));
+            $('inventory-reviews-panel').hidden=false;
+            await deleteShadows();
+            assert.deepStrictEqual(calls[2],{path:'/api/shadows/delete',payload:{shadow_ids:[12],token:'preview-token'}});
+            assert.strictEqual($('shadow-delete-dialog').open,false);
+            assert.strictEqual(inventoryRefreshes,1);
+            assert.strictEqual(reviewRefreshes,1);
+          })().catch(error=>{console.error(error);process.exitCode=1});
+        '''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True,
+                                encoding='utf-8', timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(shutil.which('node'), 'Node required for Dashboard behavior check')
     def test_act_break_titles_link_to_full_video_without_duplicate_series(self):
         start = INDEX_HTML.index('async function loadBreakpoints()')
@@ -45,7 +267,7 @@ class WebLibraryTests(unittest.TestCase):
           const $ = name => elements[name];
           const document = {createElement:element};
           function addCell(row, text) { const cell=element('td');cell.textContent=text;row.append(cell);return cell; }
-        ''' + 'const api=async()=>({items:' + json.dumps(items) + '});\n' + INDEX_HTML[start:end] + r'''
+        ''' + 'const window={};const api=async()=>({items:' + json.dumps(items) + '});\n' + INDEX_HTML[start:end] + r'''
           loadBreakpoints().then(()=>process.stdout.write(JSON.stringify(elements.breakpoints.children.map(row=>row.children[1].children[0]))));
         '''
         result = subprocess.run(['node','-e',script], capture_output=True, text=True, encoding='utf-8', check=True, timeout=15)

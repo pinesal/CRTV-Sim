@@ -161,6 +161,48 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(row["status"], "review")
         self.assertIn("not found", row["detail"])
 
+    def test_delete_one_broken_shadow_from_bulk_creation_preserves_other_placements(self):
+        service = ShadowService(self.connection, self.config)
+        for channel in ("nickelodeon", "fox"):
+            service.create(
+                folder="fox/evening/episodes/The Simpsons",
+                channel=channel, scope="daypart", value="night",
+            )
+        original = self.media / "fox/evening/episodes/The Simpsons/Season 1/S01E01.mp4"
+        original.unlink()
+        LibraryScanner(
+            self.connection, self.config, inspector=ShadowInspector()
+        ).scan()
+        service.refresh()
+        items = service.inventory()["items"]
+        self.assertEqual(len(items), 4)
+        self.assertEqual(sum(item["status"] == "review" for item in items), 2)
+        selected = next(
+            item for item in items
+            if item["status"] == "review" and item["channel_slug"] == "nickelodeon"
+        )
+        other_contents = {
+            item["shadow_relative_path"]:
+                (self.media / item["shadow_relative_path"]).read_bytes()
+            for item in items if item["id"] != selected["id"]
+        }
+        remaining_original = original.with_name("S01E02.mp4")
+        original_bytes = remaining_original.read_bytes()
+
+        preview = service.deletion_preview([selected["id"]])
+        self.assertEqual(preview["count"], 1)
+        self.assertTrue((self.media / selected["shadow_relative_path"]).is_file())
+        result = service.delete(preview["shadow_ids"], preview["token"])
+
+        self.assertEqual(result["deleted"], [selected["shadow_relative_path"]])
+        self.assertEqual(result["failed"], [])
+        self.assertFalse((self.media / selected["shadow_relative_path"]).exists())
+        self.assertEqual(len(service.inventory()["items"]), 3)
+        self.assertEqual(service.inventory()["summary"]["review"], 1)
+        for relative, contents in other_contents.items():
+            self.assertEqual((self.media / relative).read_bytes(), contents)
+        self.assertEqual(remaining_original.read_bytes(), original_bytes)
+
     def test_previewed_shadow_deletion_removes_only_sidecars(self):
         service = ShadowService(self.connection, self.config)
         created = service.create(
