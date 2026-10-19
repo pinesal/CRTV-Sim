@@ -92,7 +92,9 @@ def create_test_episode(media):
     video.parent.mkdir(parents=True)
     subprocess.run([
         str(ROOT / 'tools/ffmpeg/ffmpeg.exe'), '-hide_banner', '-loglevel', 'error',
-        '-y', '-f', 'lavfi', '-i', 'color=navy:s=320x240:r=1/10:d=1760',
+        # Ten-second frame spacing can fail mpv's real seek verification even
+        # when the player seeks correctly. Keep this tiny fixture at 2 fps.
+        '-y', '-f', 'lavfi', '-i', 'color=navy:s=320x240:r=2:d=1760',
         '-f', 'lavfi', '-i', 'anullsrc=r=8000:cl=mono', '-t', '1760',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '1',
         '-c:a', 'aac', '-b:a', '8k', '-shortest', str(video),
