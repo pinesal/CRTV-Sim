@@ -61,6 +61,8 @@ class ApplicationRuntime:
         self.shutdown_lock = threading.Lock()
         self.shutdown_complete_event = threading.Event()
         self.stop_event = threading.Event()
+        from retrotv.iptv_preview import IPTVPreview
+        self.iptv_preview = IPTVPreview(config)
         self.started_at: datetime | None = None
         self.controller: PlaybackController | None = None
         self.playback_thread: threading.Thread | None = None
@@ -416,6 +418,7 @@ class ApplicationRuntime:
             # This gate prevents automation and Dashboard actions from starting
             # more work while the current FFmpeg/database operation drains.
             self.stop_event.set()
+            self.iptv_preview.stop()
             try:
                 enter_stage("stopping television playback")
                 self.stop_tv()

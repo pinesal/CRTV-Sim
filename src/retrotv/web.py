@@ -23,6 +23,8 @@ from retrotv.asset_paths import resolve_asset_path, is_external
 from retrotv.act_break_workshop import ActBreakWorkshop
 from retrotv.act_break_workshop_ui import ACT_BREAK_WORKSHOP_JS
 from retrotv.external_media import ExternalMediaService
+from retrotv.iptv import IPTVService, inspect_url
+from retrotv.iptv_ui import IPTV_HTML, IPTV_JS
 from retrotv.config import AppConfig
 from retrotv import __version__
 from retrotv.commercial_review import CommercialReviewService
@@ -3821,6 +3823,10 @@ INDEX_HTML = """<!doctype html>
 """
 
 
+INDEX_HTML = INDEX_HTML.replace('<details class="collapsible" data-section="external-media"',
+    IPTV_HTML + '<details class="collapsible" data-section="external-media"', 1).replace(
+        '</body>', '<script>' + IPTV_JS + '</script></body>', 1)
+
 INTERNET_MEDIA_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CRTV Sim Internet Media</title><style>
@@ -4775,7 +4781,7 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
             changed_path = urlparse(self.path).path
             inventory_edit = changed_path.startswith((
                 "/api/assets/", "/api/shadows", "/api/schedule/", "/api/channels",
-                "/api/external-media", "/api/internet-media", "/api/blocks",
+                "/api/external-media", "/api/internet-media", "/api/blocks", "/api/iptv",
                 "/api/programming-rules", "/api/holiday-reviews/", "/api/duplicates",
                 "/api/bumper-cues/",
             )) or changed_path in {
@@ -4951,6 +4957,13 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
             if parsed.path == "/api/external-media":
                 with closing(connect_database(database_path)) as connection:
                     self._json(ExternalMediaService(connection, config).overview())
+                return
+            if parsed.path == '/api/iptv':
+                with closing(connect_database(database_path)) as connection:
+                    self._json(IPTVService(connection,config).overview())
+                return
+            if parsed.path == '/api/iptv/preview':
+                self._json(runtime.iptv_preview.snapshot() if runtime else {'state':'unavailable','detail':'Start the CRTV Sim application to preview on this PC'})
                 return
             if parsed.path == "/api/internet-media":
                 with connect_database(database_path) as connection:
@@ -5675,6 +5688,51 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                 except (ValueError, TypeError, OverflowError, OSError, sqlite3.Error) as exc:
                     self._json({"error": str(exc)}, 400)
                 return
+            if parsed.path == '/api/iptv' or parsed.path.startswith('/api/iptv/'):
+                try:
+                    if runtime is not None and runtime.stop_event.is_set():
+                        raise ValueError('CRTV Sim is shutting down; IPTV changes and previews are unavailable')
+                    length = int(self.headers.get('Content-Length','0'))
+                    if not 0 <= length <= 65536:
+                        raise ValueError('IPTV request is too large')
+                    payload = json.loads(self.rfile.read(length) or b'{}')
+                    if not isinstance(payload,dict):
+                        raise ValueError('Request must be an object')
+                    if parsed.path == '/api/iptv/inspect':
+                        result = inspect_url(payload.get('url',''))
+                    elif parsed.path == '/api/iptv/preview-stop':
+                        result = runtime.iptv_preview.stop() if runtime else {'state':'idle'}
+                    else:
+                        pieces = parsed.path.strip('/').split('/')
+                        feed_id = int(pieces[2]) if len(pieces)>2 else None
+                        action = pieces[3] if len(pieces)==4 else ''
+                        with closing(connect_database(database_path)) as connection:
+                            service = IPTVService(connection,config)
+                            if feed_id is None:
+                                result = service.register(payload)
+                            elif action == 'test':
+                                service.playable_url(feed_id)
+                                if runtime is None:
+                                    raise ValueError('Start the CRTV Sim application to open a test player')
+                                result = runtime.iptv_preview.start(feed_id)
+                            elif action == 'refresh':
+                                result = service.refresh(feed_id)
+                            elif action == 'remove':
+                                result = service.remove(feed_id)
+                            elif not action and len(pieces)==3:
+                                result = service.update(feed_id,payload)
+                            else:
+                                raise ValueError('Unknown IPTV action')
+                        if action not in {'test','refresh'}:
+                            started = runtime.request_maintenance() if runtime else False
+                            result.update(queued=bool(started),message='Saved. Schedule update started.' if started else 'Saved. Schedules will update at the next readiness pass; use Scan & update now when idle.')
+                    self._json(result)
+                except (ValueError,TypeError) as exc:
+                    self._json({'error':str(exc)},400)
+                except (OSError,RuntimeError,sqlite3.Error):
+                    self._json({'error':'IPTV request failed. Check the URL, selection, scheduled channel and scope; the source may be unavailable.'},400)
+                return
+
             if parsed.path == "/api/external-media" or parsed.path.startswith("/api/external-media/"):
                 try:
                     length = int(self.headers.get("Content-Length", "0"))

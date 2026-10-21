@@ -243,6 +243,7 @@ class LibraryScanner:
         disabled = 0
         if bool(library.get("auto_disable_missing_channels", True)):
             external_channels = {row[0] for row in self.connection.execute("SELECT channel_slug FROM external_assignments e JOIN storage_roots r ON r.id=e.root_id WHERE e.enabled=1 AND r.enabled=1")}
+            external_channels.update(row[0] for row in self.connection.execute("SELECT a.channel_slug FROM iptv_assignments a JOIN iptv_feeds f ON f.id=a.feed_id WHERE f.enabled=1"))
             missing = [
                 row for slug, row in existing.items() if slug not in discovered and slug not in external_channels
             ]

@@ -81,6 +81,18 @@ integration is planned separately; its existing Internet Media behavior is
 unchanged. The Windows account running CRTV Sim must be able to access the path,
 even if you open the Dashboard remotely. No Plex server or connector is required.
 
+## Use a live IPTV feed instead
+
+In **Library & Schedules → IPTV Live Feeds**, enter a direct HTTP/HTTPS HLS or
+MPEG-TS stream URL, or inspect an M3U channel list and select a feed. Assign it to
+a scheduled channel/daypart or weekly special, save, then choose **Test feed**.
+The separate test player opens on the PC running CRTV Sim.
+
+Live windows have no inserted commercials or other local programming. Shared
+programs do not conflict and are ignored during live playback; explicit
+channel-specific programs in the same active window cause a visible conflict
+instead of silently choosing a source. See [IPTV setup and troubleshooting](IPTV.md).
+
 ## 2. Put media in folders
 
 The **Media** folder is your library. Copy **_channel_template**, rename the

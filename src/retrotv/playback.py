@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping
+from uuid import uuid4
 
 from retrotv.asset_paths import resolve_asset_path, is_external
 from retrotv.config import AppConfig
@@ -116,6 +117,8 @@ class PlaybackTarget:
     missing_media: dict | None = None
     external: bool = False
     series_title: str | None = None
+    stream_url: str | None = None
+    feed_id: int | None = None
 
 
 class PlaybackError(RuntimeError):
@@ -509,6 +512,27 @@ class ScheduleResolver:
                 f"No schedule entry covers {when.isoformat()}",
             )
         row, starts, ends = selected
+        if row['entry_type'] == 'iptv_live':
+            from retrotv.iptv import IPTVService
+            service = IPTVService(self.connection, self.config)
+            facts = json.loads(row['explanation_json'])['iptv']
+            try:
+                context = self.scheduler.rules.context(channel_slug, when)
+                # Shared pools are intentionally excluded by conflicts().
+                part = self.scheduler._active_daypart(when.timetz().replace(tzinfo=None)).slug
+                if service.conflicts(channel_slug, part, context):
+                    raise ValueError('IPTV/local programming conflict; check IPTV Live Feeds')
+                feed = service._feed(facts['feed_id'])
+                if not feed['enabled']:
+                    raise ValueError('IPTV feed is disabled')
+                url = feed['stream_url']
+            except ValueError as exc:
+                target = self._resolve_channel_fallback(channel_slug, when, str(exc))
+                return replace(target, ends_at=min(ends,target.ends_at),
+                    remaining_seconds=(min(ends,target.ends_at)-when).total_seconds(), feed_id=facts['feed_id'])
+            return PlaybackTarget(int(row['id']),None,row['title'],'iptv_live',starts,ends,None,
+                'iptv_live',0,max(0,(ends-when).total_seconds()),channel_slug,
+                stream_url=url,feed_id=facts['feed_id'])
         external = row['asset_id'] is not None and is_external(self.connection, row['asset_id'])
         elapsed = max(0.0, (when - starts).total_seconds())
         remaining = max(0.0, (ends - when).total_seconds())
@@ -832,6 +856,9 @@ class MpvIpcPlayer(Player):
         self._track_snapshot: dict | None = None
         self._track_preferences: SeriesTrackPreferences | None = None
         self._track_warning: str | None = None
+        self._instance = uuid4().hex[:12]
+        self.live_failed = threading.Event()
+        self._live_cover_visible = False
 
     def start(self) -> None:
         if self.process and self.process.poll() is None:
@@ -840,11 +867,11 @@ class MpvIpcPlayer(Player):
             self.config.data.get("platform", {}).get("name", "windows")
         )
         if platform_name == "windows":
-            self._ipc_path = rf"\\.\pipe\retrotv-mpv-{os.getpid()}"
+            self._ipc_path = rf"\\.\pipe\retrotv-mpv-{os.getpid()}-{self._instance}"
         else:
             state = self.config.storage_root("state")
             state.mkdir(parents=True, exist_ok=True)
-            self._ipc_path = os.fspath(state / "mpv.sock")
+            self._ipc_path = os.fspath(state / f"mpv-{self._instance}.sock")
             Path(self._ipc_path).unlink(missing_ok=True)
         args = [
             self.executable,
@@ -964,6 +991,8 @@ class MpvIpcPlayer(Player):
             self.file_loaded.set()
         if message.get("event") == "end-file" and message.get("reason") == "eof":
             self.file_completed.set()
+        if message.get('event') == 'end-file' and message.get('reason') in {'error','eof','unknown'}:
+            self.live_failed.set()
         if message.get("event") == "property-change" and message.get("name") in {
             "aid", "sid", "sub-visibility", "track-list",
         }:
@@ -1029,6 +1058,9 @@ class MpvIpcPlayer(Player):
         return result.get("data")
 
     def load(self, target: PlaybackTarget) -> None:
+        if target.stream_url:
+            self.begin_live(target)
+            return
         if target.path is None:
             raise PlaybackError("Continuity requires a generated slate")
         self._remember_track_choices(force=True)
@@ -1037,6 +1069,10 @@ class MpvIpcPlayer(Player):
         while not self._track_changes.empty():
             self._track_changes.get_nowait()
         self.start()
+        self._command(['disable-section','iptv-live-lock'])
+        self._command(['script-message','osc-visibility','auto'])
+        self._command(['osd-overlay',998,'none',''])
+        self._live_cover_visible = False
         focus_after_initial_load = self.foreground_on_start and not self._has_loaded_media
         self.file_loaded.clear()
         self.file_completed.clear()
@@ -1052,6 +1088,7 @@ class MpvIpcPlayer(Player):
         if target.entry_type in {
             "continuity", "graphic_interstitial", "guide", "synthetic_channel",
             "watch_waiting_slate", "channel_fallback",
+            "iptv_conflict",
         }:
             options["loop-file"] = "inf"
         self._command(
@@ -1073,6 +1110,48 @@ class MpvIpcPlayer(Player):
                 f"{abs(float(reported) - target.media_offset_seconds):.2f}s"
             )
         self._command(["set_property", "pause", False])
+
+    def begin_live(self, target):
+        from retrotv.iptv import stream_url
+        url = stream_url(target.stream_url)
+        self._remember_track_choices(force=True)
+        self._track_series = None
+        self.start()
+        self.file_loaded.clear()
+        self.file_completed.clear()
+        self.live_failed.clear()
+        self._command(['define-section','iptv-live-lock',
+            'LEFT ignore\nRIGHT ignore\nSHIFT+LEFT ignore\nSHIFT+RIGHT ignore\nSPACE ignore\nMBTN_LEFT ignore\nMBTN_RIGHT ignore', 'force'])
+        self._command(['enable-section','iptv-live-lock'])
+        self._command(['script-message','osc-visibility','never'])
+        # Keep the continuity color bars visible while lavf opens the network
+        # source. An OSD cover survives asynchronous loadfile and disappears
+        # only once video/audio have reached mpv's file-loaded state.
+        colors = ('BFBFBF','00BFBF','BFBF00','00BF00','BF00BF','0000BF','BF0000')
+        cover = ''.join(r'{\an7\pos(0,0)\bord0\shad0\1c&H'+color+r'&\p1}'+
+            f'm {i*640//7} 0 l {(i+1)*640//7} 0 {(i+1)*640//7} 480 {i*640//7} 480'+r'{\p0}'
+            for i,color in enumerate(colors))
+        self._command(['osd-overlay',998,'ass-events',cover,640,480])
+        self._live_cover_visible = True
+        # loadfile is asynchronous. The controller remains free to change channels,
+        # stop playback and honor boundaries while network opening is underway.
+        options = {'pause':'no','start':'none','vf':'','loop-file':'no',
+                   'demuxer':'lavf',
+                   'network-timeout':'15','ytdl':'no','cache-pause':'no',
+                   'demuxer-lavf-o':'protocol_whitelist=[http,https,tcp,tls,crypto,data]',
+                   **{k:('yes' if v else 'no') if isinstance(v,bool) else str(v)
+                      for k,v in self._track_defaults.items()}}
+        self._command(['loadfile',url,'replace',-1,options],timeout=2)
+
+    def live_ready(self):
+        ready = self.file_loaded.is_set() and not self.live_failed.is_set()
+        if ready and self._live_cover_visible:
+            self._command(['osd-overlay',998,'none',''])
+            self._live_cover_visible = False
+        return ready
+
+    def live_broken(self):
+        return self.live_failed.is_set() or not self.is_running()
         if focus_after_initial_load and self.process is not None:
             _focus_windows_process_window(self.process.pid)
         self._has_loaded_media = True
@@ -1340,6 +1419,15 @@ class PlaybackController:
         self.channel_slug: str | None = None
         self.channel_lock = threading.Lock()
         self._pending_watch_cleanup: list[int] = []
+        self._live_feed = None
+        self._live_phase = None
+        self._live_attempts = 0
+        self._live_retry_at = 0.0
+        self._live_progress_at = 0.0
+        self._live_position = None
+        self._live_ok_since = 0.0
+        self._live_refresh_at = 0.0
+        self._live_refresh_thread = None
 
     def _checkpoint_watch(self, target: PlaybackTarget | None = None) -> None:
         active = target or self.current
@@ -1366,6 +1454,7 @@ class PlaybackController:
             target.entry_type != "synthetic_channel"
             and target.entry_type != "watch_episode"
             and target.entry_type != "channel_fallback"
+            and target.entry_type != 'iptv_live'
             and target.remaining_seconds <= self.skip_short
         ):
             raise PlaybackError(
@@ -1382,12 +1471,23 @@ class PlaybackController:
             and current.path == target.path
             and self.player.is_running()
         )
+        if target.stream_url:
+            can_continue = bool(current and current.stream_url == target.stream_url
+                and current.feed_id == target.feed_id and current.channel_slug == target.channel_slug
+                and self.player.is_running() and self._live_feed == target.feed_id)
         if not can_continue:
             if self.current is not None and self.current != target:
                 self._checkpoint_watch(self.current)
             if target.entry_type == "watch_episode" and not self.player.supports_progress:
                 raise PlaybackError("Watch at Your Pace channels require the mpv player")
-            self.player.load(target)
+            if target.stream_url:
+                self._live_feed = target.feed_id
+                self._live_attempts = 0
+                self._live_refresh_at = 0
+                self._begin_live(target)
+            else:
+                self._live_feed = None
+                self.player.load(target)
         self.current = target
         if self._pending_watch_cleanup:
             from retrotv.internet_media import PreparationService
@@ -1399,6 +1499,94 @@ class PlaybackController:
                 preparation.delete_completed_cache(episode_id)
             self._pending_watch_cleanup.clear()
         return target
+
+    def _refresh_live(self, target, *, recovery=False):
+        if self._live_refresh_thread and self._live_refresh_thread.is_alive():
+            return
+        now = time_module.monotonic()
+        if now < self._live_refresh_at:
+            return
+        self._live_refresh_at = now + (5 if recovery else 900)
+        def worker():
+            from contextlib import closing
+            from retrotv.db import connect_database
+            from retrotv.iptv import IPTVService
+            try:
+                with closing(connect_database(self.resolver.config.database_path)) as connection:
+                    service = IPTVService(connection, self.resolver.config)
+                    feed = service._feed(target.feed_id)
+                    source = connection.execute('SELECT * FROM iptv_sources WHERE id=?', (feed['source_id'],)).fetchone()
+                    age = (datetime.now().astimezone()-datetime.fromisoformat(source['last_refresh'])).total_seconds() if source['last_refresh'] else 900
+                    if not self.stop_event.is_set() and (recovery or age >= 900):
+                        service.refresh(target.feed_id,stop_event=self.stop_event)
+            except (ValueError, OSError, sqlite3.Error):
+                pass
+        self._live_refresh_thread = threading.Thread(target=worker,name='iptv-refresh',daemon=True)
+        self._live_refresh_thread.start()
+
+    def _begin_live(self, target):
+        from retrotv.iptv import IPTVService
+        service = IPTVService(self.resolver.connection,self.resolver.config)
+        try:
+            target = replace(target,stream_url=service.playable_url(target.feed_id))
+            self.player.load(target)
+            self._live_phase = 'connecting'
+            self._live_position = None
+            self._live_progress_at = time_module.monotonic()
+            service.status(target.feed_id,'connecting','Connecting to live feed')
+        except (ValueError, PlaybackError) as exc:
+            self._fail_live(target,str(exc) if isinstance(exc,ValueError) else 'Live connection failed')
+        self._refresh_live(target,recovery=self._live_attempts>0)
+
+    def _fail_live(self, target, detail):
+        from retrotv.iptv import IPTVService
+        service = IPTVService(self.resolver.connection,self.resolver.config)
+        # Do not overwrite a confirmed missing selection with a generic error.
+        feed = self.resolver.connection.execute('SELECT availability FROM iptv_feeds WHERE id=?', (target.feed_id,)).fetchone()
+        if feed is not None and feed['availability'] != 'missing':
+            service.status(target.feed_id,'error',detail)
+        self._live_attempts += 1
+        self._live_retry_at = time_module.monotonic() + (5,15,30,60)[min(self._live_attempts-1,3)]
+        self._live_phase = 'continuity'
+        slate = replace(target,entry_type='channel_fallback',path=ensure_continuity_slate(self.resolver.config),
+                        stream_url=None,media_offset_seconds=0,series_title=None)
+        self.player.load(slate)
+        self._live_refresh_at = 0
+        self._refresh_live(target,recovery=True)
+
+    def _poll_live(self, target):
+        now = time_module.monotonic()
+        self._refresh_live(target)
+        if self._live_phase == 'continuity':
+            if now >= self._live_retry_at:
+                self._begin_live(target)
+            return
+        from retrotv.iptv import IPTVService
+        try:
+            IPTVService(self.resolver.connection,self.resolver.config).playable_url(target.feed_id)
+        except ValueError as exc:
+            self._fail_live(target,str(exc))
+            return
+        if getattr(self.player,'live_broken',lambda:not self.player.is_running())():
+            self._fail_live(target,'Live stream ended or could not be decoded')
+            return
+        try:
+            position = self.player.playback_position()
+        except PlaybackError:
+            position = None
+        ready = getattr(self.player,'live_ready',lambda:position is not None)()
+        if ready and position is not None and position != self._live_position:
+            if self._live_phase != 'playing':
+                from retrotv.iptv import IPTVService
+                IPTVService(self.resolver.connection,self.resolver.config).status(target.feed_id,'available')
+                self._live_phase = 'playing'
+                self._live_ok_since = now
+            if now-self._live_ok_since >= 30:
+                self._live_attempts = 0
+            self._live_position = position
+            self._live_progress_at = now
+        elif now-self._live_progress_at >= 15:
+            self._fail_live(target,'Live connection timed out' if self._live_phase=='connecting' else 'Live stream stalled')
 
     def run(self, channel_slug: str) -> None:
         with self.channel_lock:
@@ -1431,7 +1619,7 @@ class PlaybackController:
                     continue
                 while not self.stop_event.is_set():
                     action = self.player.poll_action()
-                    if action == "pause":
+                    if action == "pause" and target.entry_type != 'iptv_live':
                         self._checkpoint_watch(target)
                         try:
                             self.player.set_paused(not self.player.is_paused())
@@ -1474,13 +1662,21 @@ class PlaybackController:
                         if target.entry_type == "watch_caught_up":
                             self.stop_event.set()
                         continue_synthetic = target.entry_type in {
-                            "synthetic_channel", "channel_fallback"
+                            "synthetic_channel", "channel_fallback", "iptv_live"
                         }
                         break
                     if self.retune_event.is_set():
                         self.retune_event.clear()
                         continue_synthetic = False
                         break
+                    if target.entry_type == 'iptv_live':
+                        try:
+                            self._poll_live(target)
+                        except (PlaybackError, ValueError):
+                            self._live_feed = None
+                            break
+                        self.sleep(min(0.25,remaining))
+                        continue
                     if not self.player.is_running():
                         print("Player exited early; retuning from wall-clock position.")
                         continue_synthetic = False
@@ -1489,6 +1685,8 @@ class PlaybackController:
         finally:
             self._checkpoint_watch()
             self.player.stop()
+            if self._live_refresh_thread:
+                self._live_refresh_thread.join(timeout=17)
 
     def request_retune(self) -> None:
         self.retune_event.set()

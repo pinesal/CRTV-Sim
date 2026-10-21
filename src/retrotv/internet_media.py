@@ -316,6 +316,8 @@ class InternetMediaService:
         mode = str(payload.get("playback_mode", "scheduled"))
         storage = str(payload.get("storage_mode", "keep"))
         if mode == 'watch_at_your_pace':
+            if self.connection.execute('SELECT 1 FROM iptv_assignments WHERE channel_slug=? LIMIT 1', (slug,)).fetchone():
+                raise ValueError('Remove IPTV assignments before switching to At Your Pace')
             from retrotv.external_media import require_scheduled_channel
             require_scheduled_channel(self.connection, slug)
         if mode not in {"scheduled", "watch_at_your_pace"}:

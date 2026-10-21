@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from retrotv.config import AppConfig
 from retrotv.db import utc_now
+from retrotv.iptv import IPTVService
 from retrotv.blocks import BlockService
 from retrotv.breakpoints import BreakpointAnalyzer
 from retrotv.bumper_cues import effective_bumper_cue, series_matches, configured_bumper_clues
@@ -705,6 +706,8 @@ class ScheduleBuilder:
         ).fetchall()
         payload = {
             "channel": channel_slug,
+            "iptv_revision": 1,
+            "iptv": IPTVService(self.connection, self.config).fingerprint(channel_slug),
             "version": self.schedule_version,
             "promo_pool_revision": 2,
             "shared_holiday_episode_revision": 1,
@@ -3531,6 +3534,12 @@ class ScheduleBuilder:
         last_program_id: int | None = None
 
         for segment in self.segments_for_date(schedule_date, channel_slug):
+            live = self._iptv_item(channel_slug, segment)
+            if live is not None:
+                self._cut_before_live(items, segment.starts_at)
+                items.append(live)
+                carried_cursor = segment.ends_at
+                continue
             if carried_cursor >= segment.ends_at:
                 continue
             cursor = max(segment.starts_at, carried_cursor)
@@ -3735,6 +3744,23 @@ class ScheduleBuilder:
                                 and series in recurring_eligible_assets):
                             underlying.setdefault(part, {})[slot] = series
                 scoped_allocation["underlying_plan"] = underlying
+        # A live window must not erase the regular grid or manufacture progress.
+        # Retain the allocator's underlying assignments, including hidden slots.
+        if scoped_allocation is not None and scoped_plan is not None:
+            from retrotv.iptv import IPTVService
+            live_service = IPTVService(self.connection, self.config)
+            if live_service.fingerprint(channel_slug):
+                for key, assignments in recurring_state.get('slots', {}).items():
+                    pattern, part = key.split(':',1)
+                    if pattern != recurring_template:
+                        continue
+                    for slot, series in assignments.items():
+                        moment = datetime.combine(schedule_date,time.min,self.timezone)+timedelta(minutes=int(slot))
+                        if (series in recurring_eligible_assets and live_service.owner(channel_slug,part,self.rules.context(channel_slug,moment))):
+                            scoped_plan.setdefault(part,{})[slot] = series
+                underlying = scoped_allocation.setdefault("underlying_plan", {})
+                for part, assignments in scoped_plan.items():
+                    underlying.setdefault(part, {}).update(assignments)
         block_opportunities = self._block_opportunities_for_date(
             channel_slug, schedule_date
         )
@@ -3749,6 +3775,13 @@ class ScheduleBuilder:
             channel_slug,
             include_block_opportunities=True,
         ):
+            live = self._iptv_item(channel_slug, segment)
+            if live is not None:
+                self._cut_before_live(items, segment.starts_at)
+                items.append(live)
+                carried_cursor = segment.ends_at
+                pending_announcement = False
+                continue
             if carried_cursor >= segment.ends_at:
                 continue
             effective_start = max(segment.starts_at, carried_cursor)
@@ -4527,6 +4560,68 @@ class ScheduleBuilder:
                  for part, queue in overlay["waiting"].items() for entry in queue]
         return self._link_announcement_blocks(items)
 
+    def _iptv_item(self, channel_slug, segment):
+        from retrotv.iptv import IPTVService
+        service = IPTVService(self.connection, self.config)
+        context = self.rules.context(channel_slug, segment.starts_at)
+        owner = service.owner(channel_slug, segment.slug, context)
+        if owner is None:
+            return None
+        conflicts = service.conflicts(channel_slug, segment.slug, context)
+        conflict = owner['conflict'] or bool(conflicts)
+        facts = {**owner, 'local_conflicts': conflicts, 'channel': channel_slug,
+                 'scope': segment.slug, 'weekly': context.owner.slug if context.owner else None}
+        return TimelineItem(None, segment.starts_at, segment.ends_at, None, None,
+            'iptv_conflict' if conflict else 'iptv_live',
+            'IPTV configuration conflict' if conflict else owner['title'], segment.slug,
+            None, 0, True, programming_owner=context.owner_slug,
+            guide_label=context.guide_label, explanation_json=json.dumps({'iptv':facts}),
+            guide_listing_title='IPTV configuration conflict' if conflict else owner['title'])
+
+    @staticmethod
+    def _cut_before_live(items, boundary):
+        while items and items[-1].starts_at >= boundary:
+            items.pop()
+        if items and items[-1].ends_at > boundary:
+            item = items[-1]
+            end_ms = (item.media_start_ms or 0) + round((boundary-item.starts_at).total_seconds()*1000)
+            items[-1] = replace(item, ends_at=boundary,
+                                media_end_ms=end_ms if item.asset_id is not None else None)
+
+    def _finish_iptv(self, channel_slug, timeline):
+        # Coalesce artificial block opportunities/daypart boundaries for one feed.
+        merged = []
+        for item in timeline:
+            if (merged and item.entry_type == 'iptv_live' and merged[-1].entry_type == 'iptv_live'
+                    and merged[-1].ends_at == item.starts_at
+                    and merged[-1].programming_owner == item.programming_owner
+                    and merged[-1].title == item.title
+                    and json.loads(merged[-1].explanation_json)['iptv']['feed_id'] == json.loads(item.explanation_json)['iptv']['feed_id']):
+                merged[-1] = replace(merged[-1], ends_at=item.ends_at)
+            else:
+                merged.append(item)
+        result = []
+        for index, item in enumerate(merged):
+            following = merged[index+1:]
+            # Only actual upcoming local program entries can authorize a card.
+            next_program = next((p for p in following if p.is_program), None)
+            if (item.entry_type == 'iptv_live' and next_program is not None
+                    and next_program.asset_id is not None
+                    and next_program.starts_at < item.ends_at+timedelta(minutes=self.clock_slot_minutes)
+                    and (item.ends_at-item.starts_at).total_seconds() >= 30
+                    and following and following[0].starts_at == item.ends_at):
+                starts = item.ends_at-timedelta(seconds=30)
+                if starts > item.starts_at:
+                    result.append(replace(item, ends_at=starts))
+                context = self.rules.context(channel_slug, item.ends_at)
+                facts = {'iptv_handoff':True, 'upcoming_start':item.ends_at.isoformat()}
+                result.append(TimelineItem(None, starts, item.ends_at, None, None,
+                    'announcement_opportunity','Up Next',item.daypart_slug,None,0,False,
+                    programming_owner=context.owner_slug,explanation_json=json.dumps(facts)))
+            else:
+                result.append(item)
+        return [replace(item,sequence_position=index) for index,item in enumerate(result)]
+
     @staticmethod
     def _validate_items(
         items: list[TimelineItem], starts_at: datetime, ends_at: datetime
@@ -4605,6 +4700,8 @@ class ScheduleBuilder:
         seed = self._seed(channel_slug, schedule_date, reroll_token)
         rng = random.Random(seed)
         scoped_allocation: dict[str, object] = {}
+        live_progress = (json.loads(json.dumps(recurring_state.get('progress',{})))
+                         if recurring_state is not None and IPTVService(self.connection,self.config).fingerprint(channel_slug) else None)
         timeline = self._build_timeline(
             channel_id,
             channel_slug,
@@ -4618,7 +4715,22 @@ class ScheduleBuilder:
         timeline = self._insert_weekly_special_promos(
             channel_slug, schedule_date, timeline
         )
+        timeline = self._finish_iptv(channel_slug, timeline)
         if recurring_state is not None:
+            if live_progress is not None:
+                aired = set()
+                for item in timeline:
+                    if item.is_program and item.asset_id is not None and item.programming_owner == 'base':
+                        row = self.connection.execute('SELECT series_title,display_title,original_filename FROM assets WHERE id=?',(item.asset_id,)).fetchone()
+                        selection = json.loads(item.explanation_json or '{}').get('selection',{})
+                        aired.add(selection.get('series') or row['series_title'] or row['display_title'] or row['original_filename'])
+                progress = recurring_state.setdefault('progress',{})
+                for series in list(progress):
+                    if series not in aired:
+                        if series in live_progress:
+                            progress[series] = live_progress[series]
+                        else:
+                            progress.pop(series)
             self._record_recurring_state(
                 recurring_state,
                 timeline,
@@ -4787,6 +4899,9 @@ class ScheduleBuilder:
             self.connection.rollback()
             raise
 
+        if not errors and IPTVService(self.connection,self.config).fingerprint(channel_slug):
+            self._repair_iptv_midnight(channel_slug,schedule_date)
+            self._repair_iptv_midnight(channel_slug,schedule_date+timedelta(days=1))
         return GenerationResult(
             generation_id,
             channel_slug,
@@ -4807,6 +4922,47 @@ class ScheduleBuilder:
             validation_status,
             detail,
         )
+
+    def _repair_iptv_midnight(self, channel, local_date):
+        """Link a previous-day feed only after tomorrow's Guide actually exists."""
+        previous = self.active_generation(channel,local_date-timedelta(days=1))
+        current = self.active_generation(channel,local_date)
+        if previous is None or current is None or previous['locked']:
+            return
+        boundary = datetime.combine(local_date,time.min,self.timezone)
+        starts = boundary-timedelta(seconds=30)
+        if starts <= datetime.now(self.timezone):
+            return  # Never rewrite history or an already-playing card.
+        entries = self.connection.execute('SELECT * FROM schedule_entries WHERE generation_id=? ORDER BY starts_at', (previous['id'],)).fetchall()
+        if not entries:
+            return
+        old_card = entries[-1] if json.loads(entries[-1]['explanation_json']).get('iptv_midnight') else None
+        tail = entries[-2] if old_card is not None else entries[-1]
+        first = self.connection.execute('''SELECT * FROM schedule_entries WHERE generation_id=? AND is_program=1 ORDER BY starts_at LIMIT 1''',(current['id'],)).fetchone()
+        eligible = (tail['entry_type']=='iptv_live' and first is not None and first['asset_id'] is not None
+                    and datetime.fromisoformat(first['starts_at']) < boundary+timedelta(minutes=self.clock_slot_minutes)
+                    and (boundary-datetime.fromisoformat(tail['starts_at'])).total_seconds()>30)
+        if old_card is not None and not eligible:
+            self.connection.execute('DELETE FROM schedule_entries WHERE id=?',(old_card['id'],))
+            self.connection.execute('UPDATE schedule_entries SET ends_at=? WHERE id=?',(_iso(boundary),tail['id']))
+            self.connection.commit()
+        elif eligible and old_card is None:
+            context = self.rules.context(channel,boundary)
+            try:
+                self.connection.execute('UPDATE schedule_entries SET ends_at=? WHERE id=?',(_iso(starts),tail['id']))
+                cursor = self.connection.execute('''INSERT INTO schedule_entries(generation_id,channel_id,starts_at,ends_at,
+                    entry_type,title,daypart_slug,sequence_position,is_program,programming_owner,explanation_json)
+                    VALUES (?,?,?,?,'announcement_opportunity','Up Next',?,?,0,?,?)''',
+                    (previous['id'],previous['channel_id'],_iso(starts),_iso(boundary),tail['daypart_slug'],
+                     tail['sequence_position']+1,context.owner_slug,json.dumps({'iptv_handoff':True,'iptv_midnight':True})))
+                self._persist_announcement_opportunities(previous['id'],previous['channel_id'],channel,utc_now())
+                self.connection.commit()
+                from retrotv.announcements import UpNextService
+                opportunity = self.connection.execute('SELECT id FROM announcement_opportunities WHERE schedule_entry_id=?',(cursor.lastrowid,)).fetchone()
+                UpNextService(self.connection,self.config).refresh_opportunity_facts(opportunity['id'])
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def _insert_weekly_special_promos(
         self, channel_slug: str, schedule_date: date, timeline: list[TimelineItem]
@@ -5040,7 +5196,9 @@ class ScheduleBuilder:
             SELECT id, starts_at, ends_at, programming_block_id, entry_type,
                    explanation_json
             FROM schedule_entries
-            WHERE generation_id=? AND entry_type IN (
+            WHERE generation_id=? AND NOT EXISTS (
+                SELECT 1 FROM announcement_opportunities ao WHERE ao.schedule_entry_id=schedule_entries.id
+            ) AND entry_type IN (
                 'announcement_opportunity','weekly_special_promo_opportunity'
             )
             ORDER BY starts_at
@@ -5060,7 +5218,7 @@ class ScheduleBuilder:
                 }
             else:
                 weekly_collection_slug = graphics.weekly_collection_at(
-                    channel_slug, datetime.fromisoformat(str(opportunity["starts_at"]))
+                    channel_slug, datetime.fromisoformat(str(opportunity["ends_at"] if json.loads(opportunity['explanation_json']).get('iptv_handoff') else opportunity["starts_at"]))
                 )
                 programs = self.connection.execute(
                     """
@@ -5071,7 +5229,7 @@ class ScheduleBuilder:
                     LEFT JOIN assets a ON a.id=se.asset_id
                     WHERE se.generation_id=? AND se.is_program=1
                       AND se.starts_at >= ?
-                    GROUP BY se.programming_block_id
+                    GROUP BY COALESCE(se.programming_block_id,-se.id)
                     ORDER BY MIN(se.starts_at)
                     LIMIT 3
                     """,

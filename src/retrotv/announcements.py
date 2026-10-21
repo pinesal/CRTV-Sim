@@ -390,7 +390,7 @@ class UpNextService:
             LEFT JOIN assets a ON a.id=se.asset_id
             WHERE sg.channel_id=? AND sg.status='active' AND se.is_program=1
               AND se.starts_at>=?
-            GROUP BY sg.id, se.programming_block_id
+            GROUP BY sg.id, COALESCE(se.programming_block_id,-se.id)
             ORDER BY MIN(se.starts_at)
             LIMIT 3
             """,

@@ -58,6 +58,7 @@ class DatabaseTests(unittest.TestCase):
                         "034_profile_tts_providers.sql",
                         "035_external_media.sql",
                         "036_generic_announcement_fallback.sql",
+                        "037_iptv.sql",
                     ],
                 )
                 self.assertEqual(

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add HTTP/HTTPS IPTV feeds and M3U selection for scheduled channels, dayparts,
+  and weekly specials, with independent setup previews and Dashboard diagnostics.
+- Preserve fixed-special priority and local recurring progress. Shared program
+  pools are excluded during live windows; explicit channel programming conflicts
+  show continuity instead of silently choosing a source.
+- Add live connection/stall recovery, clock-boundary transitions, and a final
+  30-second Up Next handoff to Guide-listed local programming.
+
 ## 0.9.55 — 2026-10-18
 
 Changes since the previous GitHub release, 0.9.53:
