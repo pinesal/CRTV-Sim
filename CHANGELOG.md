@@ -4,6 +4,8 @@
 
 - Add HTTP/HTTPS IPTV feeds and M3U selection for scheduled channels, dayparts,
   and weekly specials, with independent setup previews and Dashboard diagnostics.
+- Import mixed playlists without rejecting valid feeds because another entry
+  uses an unsupported protocol; report the skipped-entry count.
 - Preserve fixed-special priority and local recurring progress. Shared program
   pools are excluded during live windows; explicit channel programming conflicts
   show continuity instead of silently choosing a source.

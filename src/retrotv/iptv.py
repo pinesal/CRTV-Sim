@@ -72,26 +72,38 @@ def inspect_url(url: str, *, stop_event=None) -> dict:
         return {'url': url, 'kind': 'direct', 'feeds': [
             {'key': 'direct', 'name': urlsplit(final).hostname, 'url': final}]}
     feeds = []
+    skipped = []
+    entry_count = 0
     name, channel_id = '', ''
-    for raw in text.splitlines():
+    for line_number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if line.startswith('#EXTINF:'):
             name = line.partition(',')[2].strip()[:250]
             match = re.search(r'\btvg-id="([^"]*)"', line)
             channel_id = match[1] if match else ''
         elif line and not line.startswith('#'):
-            target = stream_url(urljoin(final, line))
+            entry_count += 1
+            if entry_count > 10000:
+                raise ValueError('Playlist exceeds 10,000 feeds')
+            try:
+                target = stream_url(urljoin(final, line))
+            except ValueError:
+                # A mixed channel list may contain unsupported protocols or
+                # login-bearing entries. They do not invalidate other feeds.
+                # Never return rejected URLs, which may contain credentials.
+                skipped.append({'line':line_number,'name':name,
+                                'reason':'Unsupported or invalid URL; requires HTTP/HTTPS without embedded login credentials'})
+                name, channel_id = '', ''
+                continue
             feeds.append({'key': 'id:' + channel_id if channel_id else 'url:' + target,
                           'name': name or target, 'url': target})
             name, channel_id = '', ''
-            if len(feeds) > 10000:
-                raise ValueError('Playlist exceeds 10,000 feeds')
     if not feeds:
-        raise ValueError('Playlist contains no supported feeds')
+        raise ValueError(f'Playlist contains no supported HTTP/HTTPS feeds ({len(skipped)} unsupported or invalid entries)')
     keys = Counter(f['key'] for f in feeds)
     for feed in feeds:
         feed['ambiguous'] = keys[feed['key']] != 1
-    return {'url': url, 'kind': 'playlist', 'feeds': feeds}
+    return {'url': url, 'kind': 'playlist', 'feeds': feeds, 'skipped_entries':skipped}
 
 
 class IPTVService:

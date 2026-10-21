@@ -293,4 +293,20 @@ class PlaylistTests(unittest.TestCase):
         result=self.inspect('#EXTM3U\n#EXTINF:-1 tvg-id="a",A\na.ts\n#EXTINF:-1 tvg-id="a",B\nb.ts')
         self.assertTrue(all(f['ambiguous'] for f in result['feeds']))
 
+    def test_mixed_playlist_skips_unsupported_entries_and_keeps_metadata_separate(self):
+        result=self.inspect('#EXTM3U\n#EXTINF:-1 tvg-id="one",First\nfirst.ts\n'
+            '#EXTINF:-1 tvg-id="unsupported",Unsupported\nrtsp://lan/live\n'
+            '#EXTINF:-1 tvg-id="login",Login\nhttps://user:secret@lan/live\n'
+            '#EXTINF:-1 tvg-id="legacy",Legacy\nrtmp://lan/live\n'
+            'second.ts\n#EXTINF:-1 tvg-id="three",Third\nthird.m3u8')
+        self.assertEqual([f['key'] for f in result['feeds']],
+            ['id:one','url:http://lan/channels/second.ts','id:three'])
+        self.assertEqual(len(result['skipped_entries']),3)
+        self.assertNotIn('secret',json.dumps(result))
+        self.assertEqual(result['feeds'][1]['name'],'http://lan/channels/second.ts')
+
+    def test_all_unsupported_entries_report_playlist_problem_not_input_url(self):
+        with self.assertRaisesRegex(ValueError,'no supported HTTP/HTTPS feeds.*2 unsupported'):
+            self.inspect('#EXTM3U\nrtsp://lan/live\nfile:///secret')
+
 if __name__=='__main__': unittest.main()

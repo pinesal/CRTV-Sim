@@ -11,6 +11,8 @@ or MPEG-TS URL, or an extended M3U channel-list URL. Choose **Inspect URL**, the
 select one feed. HLS quality variants and video segments are treated as one
 feed. Login pages, provider authentication, UDP/RTSP, remote EPG, recording and
 timeshift are not supported in this first version.
+Mixed playlists can still be imported: unsupported or invalid entries are skipped
+and their count is shown, while supported HTTP/HTTPS entries remain selectable.
 
 Choose an existing scheduled channel, or enter a new channel name and optional
 unused number. Add assignments to dayparts, `daytime`, `all-day`, or an existing
