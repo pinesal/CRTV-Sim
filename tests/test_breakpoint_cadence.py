@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import test_breakpoints as fixtures
+from bundled_media import bundled_tools
 from retrotv.breakpoints import BreakpointAnalyzer
 from retrotv.break_selection import match_manual, select_breaks
 from retrotv.program_timing import break_targets, normal_package_ms
@@ -169,7 +170,7 @@ class LayoutTests(unittest.TestCase):
         self.assertIn(1_000_000,service.selected_offsets(1))
 
     def test_real_noisy_fade_and_abrupt_tape_flash(self):
-        ffmpeg=self.project/'dist/CRTV-Sim-Portable-0.9.55-IPTV-Test-2/tools/ffmpeg/ffmpeg.exe'
+        ffmpeg=bundled_tools(self.project)/'ffmpeg/ffmpeg.exe'
         if not ffmpeg.is_file():self.skipTest('Bundled FFmpeg unavailable')
         self.config.data['tools']={'ffmpeg':str(ffmpeg),'ffprobe':str(ffmpeg.with_name('ffprobe.exe'))}
         service=self.service();service.minimum_segment_ms=1000

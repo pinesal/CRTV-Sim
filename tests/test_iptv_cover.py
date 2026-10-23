@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import test_scheduling as fixtures
+from bundled_media import bundled_tools
 from retrotv.iptv_cover import LiveLoadingCover
 from retrotv.playback import MpvIpcPlayer, PlaybackTarget, PlaybackError
 
@@ -23,7 +24,7 @@ class LoadingCoverTests(unittest.TestCase):
                 return struct.pack('>I',len(data))+name+data+struct.pack('>I',zlib.crc32(name+data))
             return (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',160,120,8,6,0,0,0))
                     +chunk(b'IDAT',zlib.compress((b'\0'+bytes(color)*160)*120))+chunk(b'IEND',b''))
-        ffmpeg=self.project/'dist/CRTV-Sim-Portable-0.9.55-IPTV-Test-2/tools/ffmpeg/ffmpeg.exe'
+        ffmpeg=bundled_tools(self.project)/'ffmpeg/ffmpeg.exe'
         if not ffmpeg.is_file():self.skipTest('Bundled FFmpeg unavailable')
         source=self.temporary/'media/channel/graphics/interstitials/art.png'
         source.parent.mkdir(parents=True)

@@ -9,6 +9,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 import test_scheduling as fixtures
+from bundled_media import bundled_tools
 from retrotv.db import apply_migrations, connect_database
 from retrotv.iptv import IPTVService, presentation_filter, select_feed
 from retrotv.playback import MpvIpcPlayer, PlaybackTarget
@@ -77,7 +78,7 @@ class PresentationTests(unittest.TestCase):
         finally:fixture.tearDown()
 
     def test_real_player_handles_wide_native_and_anamorphic_streams(self):
-        tools=self.project/'dist/CRTV-Sim-Portable-0.9.55-IPTV-Test-2/tools'
+        tools=bundled_tools(self.project)
         ffmpeg=tools/'ffmpeg/ffmpeg.exe';mpv=tools/'mpv/mpv.exe'
         if not ffmpeg.is_file() or not mpv.is_file():self.skipTest('Bundled media tools unavailable')
         variants=[('wide',320,180,'1/1',240),('native',240,180,'1/1',240),

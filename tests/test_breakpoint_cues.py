@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import test_breakpoints as fixtures
+from bundled_media import bundled_tools
 from retrotv.breakpoints import BreakpointAnalyzer
 from retrotv.process_control import ProcessCancelled
 
@@ -115,7 +116,7 @@ class ExtendedCueTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join(timeout=2)
 
     def test_real_music_card_pair_noise_and_unbounded_photo(self):
-        ffmpeg=self.project/'dist/CRTV-Sim-Portable-0.9.55-IPTV-Test-2/tools/ffmpeg/ffmpeg.exe'
+        ffmpeg=bundled_tools(self.project)/'ffmpeg/ffmpeg.exe'
         if not ffmpeg.is_file():self.skipTest('Bundled FFmpeg unavailable')
         self.config.data['tools']={'ffmpeg':str(ffmpeg),'ffprobe':str(ffmpeg.with_name('ffprobe.exe'))}
         service=BreakpointAnalyzer(self.connection,self.config)
