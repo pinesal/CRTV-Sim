@@ -174,7 +174,16 @@ backend = "mpv"
     write_json(output / 'THIRD-PARTY-MANIFEST.json', manifest)
     if manifest['problems'] and not internal:
         raise EvidenceError('Public packaging blocked:\n- ' + '\n- '.join(manifest['problems']))
+    if not internal:
+        (output / 'INTERNAL-BUILD-NOT-FOR-DISTRIBUTION.txt').unlink(missing_ok=True)
+        from release_reuse import source_reference
+        reference = source_reference(output)
+        if reference:
+            write_json(output / 'SOURCE-DOWNLOADS.json', reference)
+        else:
+            (output / 'SOURCE-DOWNLOADS.json').unlink(missing_ok=True)
     if internal:
+        (output / 'SOURCE-DOWNLOADS.json').unlink(missing_ok=True)
         write(output / 'INTERNAL-BUILD-NOT-FOR-DISTRIBUTION.txt',
               'Internal test candidate. Public distribution is blocked.\n\n' + '\n'.join(manifest['problems']) + '\n')
     # Only files prepared in this fresh build are eligible for archiving. This
@@ -199,20 +208,26 @@ def archive(output, version, *, internal=False):
         if parts[0] in ('user-data', '.git', '.env', 'config') or relative.lower().endswith(('.sqlite3', '.sqlite3-wal', '.sqlite3-shm', '.key', '.pfx')):
             raise EvidenceError(f'Private/development file cannot be distributed: {relative}')
     label = version + ('-INTERNAL' if internal else '')
-    source_path = output.parent / f'CRTV-Sim-{label}-ThirdParty-Sources.zip'
-    if not source_path.is_file():
-        raise EvidenceError('Matching ThirdParty-Sources.zip is required before packaging the application')
-    with zipfile.ZipFile(source_path) as source_zip:
-        if source_zip.testzip() is not None:
-            raise EvidenceError('Invalid source ZIP')
-        source_manifest = json.loads(source_zip.read('SOURCE-MANIFEST.json'))
-        if source_manifest['media'] != manifest['media']:
-            raise EvidenceError('Binary/source mapping differs between application and source package')
-        for name, record in source_manifest['sources'].items():
-            with source_zip.open(name) as stream:
-                if hashlib.file_digest(stream, 'sha256').hexdigest() != record['sha256']:
-                    raise EvidenceError(f'Source archive checksum mismatch: {name}')
-    companions = verify_source_companions(source_path, source_manifest)
+    reference = None
+    if not internal and (output / 'SOURCE-DOWNLOADS.json').is_file():
+        from release_reuse import validated_reference, supplement
+        reference = validated_reference(output)
+        source_files = [supplement(output, version, reference)]
+    else:
+        source_path = output.parent / f'CRTV-Sim-{label}-ThirdParty-Sources.zip'
+        if not source_path.is_file():
+            raise EvidenceError('Matching ThirdParty-Sources.zip is required before packaging the application')
+        with zipfile.ZipFile(source_path) as source_zip:
+            if source_zip.testzip() is not None:
+                raise EvidenceError('Invalid source ZIP')
+            source_manifest = json.loads(source_zip.read('SOURCE-MANIFEST.json'))
+            if source_manifest['media'] != manifest['media']:
+                raise EvidenceError('Binary/source mapping differs between application and source package')
+            for name, record in source_manifest['sources'].items():
+                with source_zip.open(name) as stream:
+                    if hashlib.file_digest(stream, 'sha256').hexdigest() != record['sha256']:
+                        raise EvidenceError(f'Source archive checksum mismatch: {name}')
+        source_files = [source_path, *verify_source_companions(source_path, source_manifest)]
     if any(path.is_file() for path in (output.parent / 'Media').rglob('*')):
         raise ValueError('The distribution Media scaffold contains files. Refusing to package potential personal media.')
     archive_path = output.parent / f'CRTV-Sim-{label}-Windows.zip'
@@ -234,8 +249,11 @@ def archive(output, version, *, internal=False):
         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
     write(archive_path.with_suffix('.zip.sha256'), checksum + '  ' + archive_path.name + '\n')
     write(output.parent / f'CRTV-Sim-{label}-SHA256SUMS.txt',
-          checksum + '  ' + archive_path.name + '\n' + sha256(source_path) + '  ' + source_path.name + '\n' +
-          ''.join(sha256(path)+'  '+path.name+'\n' for path in companions))
+          checksum + '  ' + archive_path.name + '\n' +
+          ''.join(sha256(path)+'  '+path.name+'\n' for path in source_files))
+    if not internal:
+        from release_reuse import write_plan
+        write_plan(output, version, [archive_path, *source_files], reference['sources'] if reference else ())
     print(f'Archive ready: {archive_path}; SHA256 {checksum}')
 
 

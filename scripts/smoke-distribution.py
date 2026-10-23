@@ -14,7 +14,7 @@ import zipfile
 from urllib.request import Request, urlopen
 
 PROJECT = Path(__file__).resolve().parents[1]
-BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.55'
+BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.56'
 ROOT = PROJECT / '.test-tmp/Frozen distributión with spaces final'
 
 
@@ -218,6 +218,15 @@ def main():
         reviews = json.loads(api('/api/inventory/reviews'))
         assert isinstance(reviews, dict), reviews
         print('Frozen workshop controls, inventory cache and review endpoint available')
+        iptv = json.loads(api('/api/iptv/options'))
+        assert isinstance(iptv['channels'], list), iptv
+        assert {'all-day', 'daytime', 'morning'}.issubset(iptv['scopes']), iptv
+        internet_page = api('/internet-media')
+        assert 'id="iptv-new-scope"' in internet_page
+        assert '/api/iptv/options' in internet_page and '/api/iptv/conflicts' in internet_page
+        counts = json.loads(api('/api/library/action-counts'))
+        assert 'duplicate-review-count' in counts['counts'], counts
+        print('Frozen IPTV assignment options and Library heading-count API available')
         assert hashlib.sha256(video.read_bytes()).hexdigest() == source_hash
         stop(process)
         overlay=ROOT/'user-data/config/portable.windows.settings.json'

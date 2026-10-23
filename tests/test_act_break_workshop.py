@@ -52,7 +52,7 @@ class ActBreakWorkshopTests(unittest.TestCase):
           const calls=[];let saved=0,lastOffset=0,manual=false,hold=false,release;
           const item={id:1,duration_seconds:2640,series_title:'Show',display_title:'Episode',targets:[
             {index:1,target_ms:600000,selected:{offset_ms:600000,method:'fade'}},
-            {index:2,target_ms:1500000,selected:{offset_ms:1500000,method:'midpoint'}}]};
+            {index:2,target_ms:1500000,selected:{offset_ms:1500000,method:'scene_fallback'}}]};
           function ready(offset,playback=false){
             lastOffset=offset;return {state:'ready',generation:calls.length,result:{offset_ms:offset,source_seconds:offset/1000,
               duration_ms:2640000,start_ms:offset-30000,end_ms:offset+30000,frame_token:'frame-'+offset,
@@ -241,7 +241,8 @@ class ActBreakWorkshopTests(unittest.TestCase):
 
         payload = {'action':'manual','workshop_session':session,'frame_token':result['frame_token'],
                    'offset_ms':600000,'target_index':1}
-        with patch.object(BreakpointAnalyzer,'set_manual',side_effect=save):
+        with patch.object(BreakpointAnalyzer,'set_manual',side_effect=save), \
+             patch.object(BreakpointAnalyzer,'recorded_layout',return_value={'identity':self.service._source(1)['layout_identity']}):
             worker = threading.Thread(target=lambda:self.service.save(None,1,payload))
             worker.start()
             self.assertTrue(entered.wait(5))

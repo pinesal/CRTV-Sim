@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from retrotv.asset_paths import resolve_asset_path, is_external
+from retrotv.asset_paths import (
+    resolve_asset_path, is_external, require_managed_asset, checked_unlink, asset_root,
+)
 from retrotv.config import AppConfig
 from retrotv.db import ensure_storage_root, utc_now
 from retrotv.probe import probe_media
@@ -356,9 +358,11 @@ class DuplicateService:
                 """
                 SELECT a.id, a.source_relative_path, a.channel_slug, a.daypart_slug,
                        a.collection_type, a.collection_slug, a.display_title,
-                       a.file_size, n.analysis_status, n.proxy_status
+                       a.file_size, n.analysis_status, n.proxy_status,
+                       r.source_kind
                 FROM asset_content_hashes h
                 JOIN assets a ON a.id=h.asset_id
+                JOIN storage_roots r ON r.id=a.source_root_id
                 LEFT JOIN normalization_profiles n ON n.asset_id=a.id
                 WHERE h.original_sha256=?
                   AND a.integrity_status IN ('ready','not_scanned')
@@ -394,6 +398,84 @@ class DuplicateService:
             "intentional": sum(item["status"] == "intentional" for item in items),
             "duplicate_bytes": sum(item["duplicate_bytes"] for item in items),
         }
+
+    def deletion_preview(self, asset_id: int, sha256: str) -> dict[str, Any]:
+        """Confirm one physical copy, never a hash-wide or placement-wide delete."""
+        if not re_full_sha256(sha256):
+            raise ValueError("Invalid duplicate hash")
+        rows = self.connection.execute(
+            """SELECT a.id,a.source_relative_path,h.working_sha256
+               FROM assets a JOIN asset_content_hashes h ON h.asset_id=a.id
+               WHERE h.original_sha256=? AND a.integrity_status IN ('ready','not_scanned')
+               ORDER BY a.id""", (sha256,),
+        ).fetchall()
+        selected = next((row for row in rows if row['id'] == asset_id), None)
+        if selected is None or len(rows) < 2:
+            raise ValueError("Duplicate set changed. Refresh duplicates and try again.")
+        path = require_managed_asset(self.connection, self.config, asset_id)
+        root, _ = asset_root(self.connection, self.config, asset_id)
+        logical_path = root / selected['source_relative_path']
+        if os.path.normcase(os.path.abspath(logical_path)) != os.path.normcase(str(path)):
+            raise ValueError("This placement uses a junction or symbolic link. Remove the alias manually instead.")
+        if not path.is_file():
+            raise ValueError("This copy is missing. Rescan the library first.")
+        identities, remaining = [], []
+        for row in rows:
+            other = resolve_asset_path(self.connection, self.config, int(row['id']))
+            if row['id'] != asset_id and other == path:
+                raise ValueError("These placements point to the same physical file; remove the alias manually instead.")
+            stat = other.stat() if other.is_file() else None
+            identities.append((row['id'], str(other), row['working_sha256'],
+                               stat.st_size if stat else None, stat.st_mtime_ns if stat else None))
+            if row['id'] != asset_id and stat:
+                remaining.append({'id': row['id'], 'path': str(other)})
+        if not remaining:
+            raise ValueError("No other accessible copy remains. Restore or reconnect another copy first.")
+        shadows = [dict(row) for row in self.connection.execute(
+            "SELECT id,shadow_relative_path FROM shadow_files WHERE target_asset_id=? ORDER BY id",
+            (asset_id,),
+        ).fetchall()]
+        identity = {'asset_id': asset_id, 'files': identities, 'shadows': shadows}
+        return {
+            'asset_id': asset_id, 'sha256': sha256, 'path': str(path),
+            'relative_path': selected['source_relative_path'],
+            'remaining': remaining, 'shadows': shadows,
+            'token': hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(),
+        }
+
+    def delete_copy(self, asset_id: int, sha256: str, token: str) -> dict[str, Any]:
+        """Retain history and backups; retire only the explicitly confirmed file."""
+        # Reserve the writer before filesystem deletion: a busy DB must never
+        # produce a removed file with an unmodified catalog.
+        if self.connection.in_transaction:
+            raise ValueError("Finish the current database transaction before deleting media")
+        self.connection.execute('BEGIN IMMEDIATE')
+        try:
+            preview = self.deletion_preview(asset_id, sha256)
+            if not isinstance(token, str) or token != preview['token']:
+                raise ValueError("The files or placements changed. Preview deletion again.")
+            self.connection.execute(
+                """UPDATE assets SET integrity_status='missing',review_status='ignored',
+                   enabled_for_scheduling=0 WHERE id=?""", (asset_id,),
+            )
+            self.connection.execute(
+                "UPDATE review_items SET status='resolved',resolved_at=? WHERE asset_id=? AND status='open'",
+                (utc_now(), asset_id),
+            )
+            self.connection.execute(
+                """UPDATE shadow_files SET status='review',detail='Target media was deleted during duplicate review'
+                   WHERE target_asset_id=?""", (asset_id,),
+            )
+            # Recheck ownership at the actual write boundary, including aliases
+            # into registered external roots. Do not touch backups or sidecars.
+            path = require_managed_asset(self.connection, self.config, asset_id)
+            checked_unlink(self.connection, path)
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return {'deleted': preview['path'], 'asset_id': asset_id,
+                'affected_shadows': len(preview['shadows'])}
 
     def review(self, sha256: str, action: str) -> None:
         if not re_full_sha256(sha256):

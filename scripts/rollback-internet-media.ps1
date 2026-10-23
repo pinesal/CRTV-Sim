@@ -3,7 +3,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$buildName = 'CRTV-Sim-Portable-0.9.55'
+$buildName = 'CRTV-Sim-Portable-0.9.56'
 $parent = Split-Path -Parent $PSScriptRoot
 $candidates = if ($FeatureBuild) {
     if ([IO.Path]::IsPathRooted($FeatureBuild)) {

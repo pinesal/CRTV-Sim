@@ -12,7 +12,7 @@ class ActBreakWorkshopUI {
     this.item = item; this.options = options; this.session = null; this.sequence = 0;
     this.closed = false; this.busy = false; this.playing = false; this.readyFrame = false;
     this.duration = Number(item.duration_seconds) * 1000;
-    this.targetIndex = (item.targets.find(t => ['midpoint','quiet_pause'].includes(t.selected?.method)) || item.targets[0])?.index;
+    this.targetIndex = (item.targets.find(t => ['midpoint','quiet_pause','scene_fallback'].includes(t.selected?.method)) || item.targets[0])?.index;
     const node = (tag, text, props = {}) => {
       const result = document.createElement(tag);
       if (text != null) result.textContent = text;
@@ -76,11 +76,13 @@ class ActBreakWorkshopUI {
     this.video.onerror=()=>{this.playing=false;this.message('Preview playback failed. Reload this workshop or use the existing typed timestamp controls.');this.updateButtons();};
     this.renderTargets();this.seekTarget();
   }
+  methodLabel(method){return ({still_card:'Still-card cue',scene_fallback:'Scene-transition fallback',quiet_pause:'Quiet-pause fallback',midpoint:'Generic midpoint'})[method] || method;}
   get target(){return this.item.targets.find(t=>t.index===this.targetIndex);}
   renderTargets(){
+    if(!this.item.targets.some(t=>t.index===this.targetIndex))this.targetIndex=this.item.targets[0]?.index;
     this.targetSelect.replaceChildren(...this.item.targets.map(t=>{
       const o=document.createElement('option');o.value=t.index;
-      o.textContent=`Break ${t.index} — ${t.selected?.method || 'no selected break'}`;return o;
+      o.textContent=`Break ${t.index} (${(t.role||'target').replaceAll('_',' ')}) — ${this.methodLabel(t.selected?.method) || 'no selected break'}`;return o;
     }));
     this.targetSelect.value=this.targetIndex;this.showSaved();
     this.markers.replaceChildren();
@@ -88,21 +90,25 @@ class ActBreakWorkshopUI {
       if(!target.selected)continue;
       const marker=document.createElement('span');marker.textContent=`▼ ${target.index}`;
       marker.style.left=`${target.selected.offset_ms/this.duration*100}%`;
-      marker.title=`Break ${target.index}: ${this.options.format(target.selected.offset_ms)} — ${target.selected.method}`;
+      marker.title=`Break ${target.index}: ${this.options.format(target.selected.offset_ms)} — ${this.methodLabel(target.selected.method)}`;
       this.markers.append(marker);
     }
   }
   showSaved(){
     const selected=this.target?.selected;
     const signals=selected?.signals || {};const evidence=[];
-    if(signals.black_duration)evidence.push(`black ${Number(signals.black_duration).toFixed(2)}s`);
+    if(signals.black_duration)evidence.push(`${signals.noisy_black?'VHS-tolerant':'Strict'} black ${Number(signals.black_duration).toFixed(2)}s`);
+    if(signals.before_contrast!=null)evidence.push(`luma contrast ${Number(signals.before_contrast).toFixed(1)} / ${Number(signals.after_contrast).toFixed(1)}`);
+    if(signals.outside_preferred_window)evidence.push('strong cue outside preferred window');
+    if(signals.selection_reason)evidence.push(signals.selection_reason);
     if(signals.scene_change)evidence.push('scene change');
     if(signals.silence)evidence.push('silence');
     if(signals.silence_duration_ms)evidence.push(`quiet ${(signals.silence_duration_ms/1000).toFixed(2)}s`);
     if(signals.chapter_supported)evidence.push(`chapter ${this.options.format(signals.chapter_marker_ms)}`);
+    for(const hold of signals.holds || [])evidence.push(`held card ${(hold.duration_ms/1000).toFixed(2)}s (${this.options.format(hold.start_ms)}–${this.options.format(hold.end_ms)})`);
     if(signals.reason)evidence.push(signals.reason);
     this.saved.textContent=selected
-      ? `Saved Break ${this.targetIndex}: ${this.options.format(selected.offset_ms)} — ${selected.method}${evidence.length ? '; '+evidence.join('; ') : ''}`
+      ? `Saved Break ${this.targetIndex}: ${this.options.format(selected.offset_ms)} — ${this.methodLabel(selected.method)}${evidence.length ? '; '+evidence.join('; ') : ''}`
       : `Break ${this.targetIndex}: no saved breakpoint; target ${this.options.format(this.target?.target_ms)}`;
     this.reset.hidden=!this.target?.manual;
   }
@@ -246,7 +252,7 @@ class ActBreakWorkshopUI {
     if(this.closed || this.busy || (action==='manual' && (!this.readyFrame || this.playing)))return;
     this.saving=true;this.busy=true;this.updateButtons();this.message('Saving act break…');
     try{
-      const payload={action,target_index:this.targetIndex,workshop_session:this.session};
+      const payload={action,target_index:this.targetIndex,workshop_session:this.session,target_layout_identity:this.item.target_layout_identity};
       if(action==='manual')Object.assign(payload,{offset_ms:this.result.offset_ms,
         workshop_session:this.session,frame_token:this.result.frame_token,working_identity:this.result.working_identity});
       await this.options.api(`/api/assets/${this.item.id}/breakpoint`,{

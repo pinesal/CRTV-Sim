@@ -6,7 +6,7 @@ CRTV Sim into an IPTV server or broadcast your channels over the network.
 
 ## Add and test a feed
 
-Open **Library & Schedules → IPTV Live Feeds**. Enter a direct HTTP/HTTPS HLS
+Open **Internet Media → IPTV Live Feeds**. Enter a direct HTTP/HTTPS HLS
 or MPEG-TS URL, or an extended M3U channel-list URL. Choose **Inspect URL**, then
 select one feed. HLS quality variants and video segments are treated as one
 feed. Login pages, provider authentication, UDP/RTSP, remote EPG, recording and
@@ -18,13 +18,31 @@ Choose an existing scheduled channel, or enter a new channel name and optional
 unused number. Add assignments to dayparts, `daytime`, `all-day`, or an existing
 weekly special. A feed can have several assignments across several channels.
 Optional assignment labels override its default Guide name.
+Channel and daypart choices load when the page opens. Under **Assign to existing
+channels**, choose **Existing channel** and **Daypart or weekly special**. Entering
+a new channel name instead shows **New channel daypart**; this defaults to
+`all-day` and can be changed before saving. If options cannot load, use **Refresh
+status** to retry. The form will not silently save a feed without a destination.
+Assignment choices and saved feeds load independently of schedule-conflict
+diagnostics. A slow conflict check does not prevent assigning or saving a feed.
+Options requests time out after ten seconds with a visible retry message;
+**Refresh status** can also cancel a stalled request and try again immediately.
+Incomplete conflict checks are reported separately and never mean "no conflicts."
 
-Choose **Test feed** after saving. A separate mpv window opens **on the PC running
-CRTV Sim**, even when you use the Dashboard from another device. The test checks
-decoded video and the presence of an audio track without stopping television;
-it closes after 30 seconds or when you choose **Close preview**. Saving a known
-direct stream without inspection is available when the source is temporarily
-offline; a successful test is still recommended before relying on it.
+Choose **Test selected feed** before saving. A separate mpv window opens
+**on the PC running CRTV Sim**, even when you use the Dashboard from another
+device. The test checks decoded, advancing video and reports whether an audio
+track is present without stopping television. Once video decodes, **Add feed**
+becomes available. It closes after 30 seconds or when you choose **Close preview**;
+closing a successful preview keeps the result available for saving.
+
+Testing creates no source records, channels or channel folders. New channel
+creation requires a successful test on the server as well as in the interface.
+Changing the source URL, direct/playlist mode or selected feed requires another
+test. Results expire after 30 minutes or an application restart. A failed or
+cancelled test cannot authorize channel creation. **Direct stream** skips playlist
+inspection, but still requires the playback test. Already saved feeds retain
+**Test feed** for troubleshooting.
 
 Guide, Weather and At Your Pace channels are excluded. Remove IPTV assignments
 before changing a scheduled channel to At Your Pace. IPTV does not change the
@@ -57,9 +75,38 @@ Recurring local episode progress does not advance during live/conflict windows.
 ## Transitions and outages
 
 CRTV Sim cuts the outgoing source at the PC's scheduled boundary. The incoming
-network source can take time to buffer; continuity bars cover connection and
-recovery. Live seeking and pause are disabled. An unchanged feed continues across
+network source can take time to buffer. The channel's configured interstitial
+graphic covers connection and recovery, using the existing holiday, weekly-special
+and daypart selection rules. This is a silent still frame (the first frame for
+video interstitials); standard continuity bars remain the fallback when no usable
+graphic is available. Preparing or reading a graphic never delays opening the feed.
+The cover fits the window and clears when decoded video is available.
+Live seeking and pause are disabled. An unchanged feed continues across
 adjacent scopes and midnight without reconnecting.
+
+### Fit a live feed to a 4:3 CRT
+
+Each feed has a **Presentation** selector, both before testing a new feed and
+on its saved card:
+
+- **Preserve original** (default): keep the stream's aspect ratio.
+- **Fill 4:3 — center crop**: trim the sides of widescreen video without
+  stretching. Native 4:3 remains intact; narrower video is cropped at the top
+  and bottom to fill 4:3. Edge logos and subtitles can be cut off.
+- **Stretch to 4:3**: keep the full frame but change its proportions to 4:3.
+
+These affect live playback only, with no download, re-encoding or modification
+of the source stream. mpv scales the result to the display. Crop calculations
+respect pixel aspect ratios and adapt when a provider changes video format,
+such as at an advertisement. This is a centered crop, not face tracking or
+continuous black-bar detection.
+
+The separate feed test uses the selected presentation. Changing it before
+registration requires another successful test. For a saved feed, **Test feed**
+previews the edited choice; **Save** applies it to TV playback, including an
+already-playing feed without reconnecting. Presentation is shared wherever
+that feed is assigned. Existing feeds retain Preserve original. Local programs,
+channel graphics, normalization and scheduling progress are unaffected.
 
 The final 30 seconds before a transition to locally scheduled programming can
 show Up Next when that programming appears in the Guide. This uses the upcoming
@@ -91,5 +138,7 @@ does not invalidate schedules; assignment and enable/disable changes do.
 Dashboard interfaces are `GET /api/iptv`, `POST /api/iptv/inspect`, `POST /api/iptv`,
 `POST /api/iptv/{id}`, and feed actions `refresh`, `test`, `remove`.
 `GET /api/iptv/preview` reports the independent test and
-`POST /api/iptv/preview-stop` closes it. Feed actions use saved identities; arbitrary
+`POST /api/iptv/preview-test` tests an unsaved URL/selection without registration.
+Its server-issued `test_id` accompanies registration; new channels require a
+matching successful test. `POST /api/iptv/preview-stop` closes the preview. Feed actions use saved identities; arbitrary
 player commands and filesystem paths are not accepted.

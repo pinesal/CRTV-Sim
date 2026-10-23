@@ -513,7 +513,7 @@ class ScheduleResolver:
             )
         row, starts, ends = selected
         if row['entry_type'] == 'iptv_live':
-            from retrotv.iptv import IPTVService
+            from retrotv.iptv import IPTVService, presentation_filter
             service = IPTVService(self.connection, self.config)
             facts = json.loads(row['explanation_json'])['iptv']
             try:
@@ -532,7 +532,8 @@ class ScheduleResolver:
                     remaining_seconds=(min(ends,target.ends_at)-when).total_seconds(), feed_id=facts['feed_id'])
             return PlaybackTarget(int(row['id']),None,row['title'],'iptv_live',starts,ends,None,
                 'iptv_live',0,max(0,(ends-when).total_seconds()),channel_slug,
-                stream_url=url,feed_id=facts['feed_id'])
+                stream_url=url,feed_id=facts['feed_id'],
+                video_filter=presentation_filter(feed['presentation']))
         external = row['asset_id'] is not None and is_external(self.connection, row['asset_id'])
         elapsed = max(0.0, (when - starts).total_seconds())
         remaining = max(0.0, (ends - when).total_seconds())
@@ -859,6 +860,10 @@ class MpvIpcPlayer(Player):
         self._instance = uuid4().hex[:12]
         self.live_failed = threading.Event()
         self._live_cover_visible = False
+        self._live_cover_service = None
+        self._live_cover_bitmap = None
+        self._live_cover_layout = None
+        self._live_cover_text = None
 
     def start(self) -> None:
         if self.process and self.process.poll() is None:
@@ -1070,9 +1075,12 @@ class MpvIpcPlayer(Player):
             self._track_changes.get_nowait()
         self.start()
         self._command(['disable-section','iptv-live-lock'])
-        self._command(['script-message','osc-visibility','auto'])
-        self._command(['osd-overlay',998,'none',''])
-        self._live_cover_visible = False
+        # The OSC's optional final argument suppresses its own status message;
+        # otherwise every local file replaces our channel OSD with "OSC visibility".
+        self._command(['script-message','osc-visibility','auto','no-osd'])
+        self._clear_live_cover()
+        if self._live_cover_service is not None:
+            self._live_cover_service.cancel()
         focus_after_initial_load = self.foreground_on_start and not self._has_loaded_media
         self.file_loaded.clear()
         self.file_completed.clear()
@@ -1123,19 +1131,13 @@ class MpvIpcPlayer(Player):
         self._command(['define-section','iptv-live-lock',
             'LEFT ignore\nRIGHT ignore\nSHIFT+LEFT ignore\nSHIFT+RIGHT ignore\nSPACE ignore\nMBTN_LEFT ignore\nMBTN_RIGHT ignore', 'force'])
         self._command(['enable-section','iptv-live-lock'])
-        self._command(['script-message','osc-visibility','never'])
-        # Keep the continuity color bars visible while lavf opens the network
-        # source. An OSD cover survives asynchronous loadfile and disappears
-        # only once video/audio have reached mpv's file-loaded state.
-        colors = ('BFBFBF','00BFBF','BFBF00','00BF00','BF00BF','0000BF','BF0000')
-        cover = ''.join(r'{\an7\pos(0,0)\bord0\shad0\1c&H'+color+r'&\p1}'+
-            f'm {i*640//7} 0 l {(i+1)*640//7} 0 {(i+1)*640//7} 480 {i*640//7} 480'+r'{\p0}'
-            for i,color in enumerate(colors))
-        self._command(['osd-overlay',998,'ass-events',cover,640,480])
+        self._command(['script-message','osc-visibility','never','no-osd'])
+        self._request_live_cover(target)
         self._live_cover_visible = True
+        self._update_live_cover()
         # loadfile is asynchronous. The controller remains free to change channels,
         # stop playback and honor boundaries while network opening is underway.
-        options = {'pause':'no','start':'none','vf':'','loop-file':'no',
+        options = {'pause':'no','start':'none','vf':target.video_filter or '','loop-file':'no',
                    'demuxer':'lavf',
                    'network-timeout':'15','ytdl':'no','cache-pause':'no',
                    'demuxer-lavf-o':'protocol_whitelist=[http,https,tcp,tls,crypto,data]',
@@ -1145,16 +1147,87 @@ class MpvIpcPlayer(Player):
 
     def live_ready(self):
         ready = self.file_loaded.is_set() and not self.live_failed.is_set()
+        if ready:
+            # file-loaded precedes the first decoded frame for some network feeds.
+            try:
+                ready = bool(self._command(['get_property','video-params'])) and self.playback_position() is not None
+            except PlaybackError:
+                ready = False
         if ready and self._live_cover_visible:
-            self._command(['osd-overlay',998,'none',''])
-            self._live_cover_visible = False
+            self._clear_live_cover(display_pending=True)
+        elif self._live_cover_visible:
+            self._update_live_cover()
         return ready
+
+    def _clear_live_cover(self, *, display_pending=False):
+        if self._live_cover_bitmap is not None:
+            self._command(['overlay-remove',63])
+        self._command(['osd-overlay',998,'none',''])
+        self._live_cover_bitmap = self._live_cover_layout = None
+        self._live_cover_visible = False
+        pending, self._live_cover_text = self._live_cover_text, None
+        if display_pending and pending is not None:
+            self.show_text(*pending)
+
+    def _request_live_cover(self, target):
+        if target.channel_slug and self.connection is not None:
+            from retrotv.iptv_cover import LiveLoadingCover
+            if self._live_cover_service is None:
+                self._live_cover_service = LiveLoadingCover(self.config)
+            self._live_cover_service.request(target.channel_slug, datetime.now(target.starts_at.tzinfo))
+
+    def _update_live_cover(self):
+        if not self._live_cover_visible:
+            return
+        frame = self._live_cover_service.snapshot() if self._live_cover_service else None
+        if frame is not None:
+            try:
+                dimensions = self._command(['get_property','osd-dimensions']) or {}
+                width, height = int(dimensions.get('w') or 640), int(dimensions.get('h') or 480)
+                dw, dh = min(width, height * 4 // 3), min(height, width * 3 // 4)
+                layout = (frame, width, height)
+                if layout != self._live_cover_layout:
+                    # Matte the whole window; the 4:3 graphic sits above it.
+                    self._command(['osd-overlay',998,'ass-events',
+                        r'{\an7\pos(0,0)\bord0\shad0\1a&H00&\1c&H000000&\p1}m 0 0 l 640 0 640 480 0 480{\p0}',640,480])
+                    self._command(['overlay-add',63,(width-dw)//2,(height-dh)//2,
+                        os.fspath(frame),0,'bgra',640,480,640*4,dw,dh])
+                    self._live_cover_bitmap, self._live_cover_layout = frame, layout
+                return
+            except (PlaybackError, OSError, ValueError):
+                # Unsupported/missing bitmap data must retain an opaque cover.
+                if self._live_cover_bitmap is not None:
+                    self._command(['overlay-remove',63])
+                self._live_cover_bitmap = self._live_cover_layout = None
+        elif self._live_cover_bitmap is not None:
+            self._command(['overlay-remove',63])
+            self._live_cover_bitmap = self._live_cover_layout = None
+        if self._live_cover_layout == 'continuity':
+            return
+        colors = ('BFBFBF','00BFBF','BFBF00','00BF00','BF00BF','0000BF','BF0000')
+        # Separate ASS events prevent adjoining drawings from shifting each other.
+        cover = '\n'.join(r'{\an7\pos(0,0)\bord0\shad0\1a&H00&\1c&H'+color+r'&\p1}'+
+            f'm {i*640//7} 0 l {(i+1)*640//7} 0 {(i+1)*640//7} 480 {i*640//7} 480'+r'{\p0}'
+            for i,color in enumerate(colors))
+        self._command(['osd-overlay',998,'ass-events',cover,640,480])
+        self._live_cover_layout = 'continuity'
+
+    def show_live_waiting(self, target):
+        # Stop the failed connection, keeping the same branded cover over idle mpv.
+        if self._live_cover_service is None or self._live_cover_service.channel != target.channel_slug:
+            self._request_live_cover(target)
+        self._command(['stop'])
+        self._live_cover_visible = True
+        self._update_live_cover()
 
     def live_broken(self):
         return self.live_failed.is_set() or not self.is_running()
         if focus_after_initial_load and self.process is not None:
             _focus_windows_process_window(self.process.pid)
         self._has_loaded_media = True
+
+    def set_live_filter(self, video_filter):
+        self._command(['set_property','vf',video_filter or ''])
 
     def _preferences(self) -> SeriesTrackPreferences:
         if self._track_preferences is None:
@@ -1289,6 +1362,9 @@ class MpvIpcPlayer(Player):
             return None
 
     def show_text(self, text: str, duration_ms: int = 2000) -> None:
+        if self._live_cover_visible:
+            self._live_cover_text = (text, duration_ms)
+            return
         self._command(["show-text", text, duration_ms])
 
     def set_osd_font_size(self, size: int) -> None:
@@ -1303,6 +1379,12 @@ class MpvIpcPlayer(Player):
         self._command(["set_property", "mute", not muted])
 
     def stop(self) -> None:
+        if self._live_cover_service is not None:
+            self._live_cover_service.close()
+            self._live_cover_service = None
+        self._live_cover_bitmap = self._live_cover_layout = None
+        self._live_cover_visible = False
+        self._live_cover_text = None
         if self.process and self.process.poll() is None:
             self._remember_track_choices(force=True)
         self._track_series = None
@@ -1404,6 +1486,7 @@ class PlaybackController:
         sleep: Callable[[float], None] = time_module.sleep,
         skip_short_remaining_seconds: float = 1.0,
         action_handler: Callable[[str], None] | None = None,
+        tune_handler: Callable[[str], None] | None = None,
     ):
         self.resolver = resolver
         self.player = player
@@ -1416,6 +1499,10 @@ class PlaybackController:
         self.retune_event = threading.Event()
         self.current: PlaybackTarget | None = None
         self.action_handler = action_handler
+        self.tune_handler = tune_handler
+        self._tune_revision = 0
+        self._shown_tune_revision = -1
+        self._shown_channel = None
         self.channel_slug: str | None = None
         self.channel_lock = threading.Lock()
         self._pending_watch_cleanup: list[int] = []
@@ -1428,6 +1515,7 @@ class PlaybackController:
         self._live_ok_since = 0.0
         self._live_refresh_at = 0.0
         self._live_refresh_thread = None
+        self._live_filter = None
 
     def _checkpoint_watch(self, target: PlaybackTarget | None = None) -> None:
         active = target or self.current
@@ -1449,6 +1537,8 @@ class PlaybackController:
     def tune_once(
         self, channel_slug: str, *, continue_synthetic: bool = False
     ) -> PlaybackTarget:
+        with self.channel_lock:
+            tune_revision = self._tune_revision
         target = self.resolver.resolve(channel_slug, self.clock())
         if (
             target.entry_type != "synthetic_channel"
@@ -1498,6 +1588,11 @@ class PlaybackController:
             for episode_id in self._pending_watch_cleanup:
                 preparation.delete_completed_cache(episode_id)
             self._pending_watch_cleanup.clear()
+        if self.tune_handler is not None and (
+                self._shown_channel != channel_slug or self._shown_tune_revision != tune_revision):
+            self.tune_handler(channel_slug)
+            self._shown_channel = channel_slug
+            self._shown_tune_revision = tune_revision
         return target
 
     def _refresh_live(self, target, *, recovery=False):
@@ -1525,11 +1620,13 @@ class PlaybackController:
         self._live_refresh_thread.start()
 
     def _begin_live(self, target):
-        from retrotv.iptv import IPTVService
+        from retrotv.iptv import IPTVService, presentation_filter
         service = IPTVService(self.resolver.connection,self.resolver.config)
         try:
-            target = replace(target,stream_url=service.playable_url(target.feed_id))
+            target = replace(target,stream_url=service.playable_url(target.feed_id),
+                video_filter=presentation_filter(service._feed(target.feed_id)['presentation']))
             self.player.load(target)
+            self._live_filter = target.video_filter
             self._live_phase = 'connecting'
             self._live_position = None
             self._live_progress_at = time_module.monotonic()
@@ -1548,9 +1645,13 @@ class PlaybackController:
         self._live_attempts += 1
         self._live_retry_at = time_module.monotonic() + (5,15,30,60)[min(self._live_attempts-1,3)]
         self._live_phase = 'continuity'
-        slate = replace(target,entry_type='channel_fallback',path=ensure_continuity_slate(self.resolver.config),
-                        stream_url=None,media_offset_seconds=0,series_title=None)
-        self.player.load(slate)
+        waiting = getattr(self.player, 'show_live_waiting', None)
+        if waiting is not None:
+            waiting(target)
+        else:
+            slate = replace(target,entry_type='channel_fallback',path=ensure_continuity_slate(self.resolver.config),
+                            stream_url=None,media_offset_seconds=0,series_title=None)
+            self.player.load(slate)
         self._live_refresh_at = 0
         self._refresh_live(target,recovery=True)
 
@@ -1558,12 +1659,22 @@ class PlaybackController:
         now = time_module.monotonic()
         self._refresh_live(target)
         if self._live_phase == 'continuity':
+            update_cover = getattr(self.player, '_update_live_cover', None)
+            if update_cover is not None:
+                update_cover()
             if now >= self._live_retry_at:
                 self._begin_live(target)
             return
-        from retrotv.iptv import IPTVService
+        from retrotv.iptv import IPTVService, presentation_filter
         try:
-            IPTVService(self.resolver.connection,self.resolver.config).playable_url(target.feed_id)
+            service = IPTVService(self.resolver.connection,self.resolver.config)
+            service.playable_url(target.feed_id)
+            video_filter = presentation_filter(service._feed(target.feed_id)['presentation'])
+            if video_filter != self._live_filter:
+                setter = getattr(self.player,'set_live_filter',None)
+                if setter is not None:
+                    setter(video_filter)
+                self._live_filter = video_filter
         except ValueError as exc:
             self._fail_live(target,str(exc))
             return
@@ -1689,11 +1800,14 @@ class PlaybackController:
                 self._live_refresh_thread.join(timeout=17)
 
     def request_retune(self) -> None:
+        with self.channel_lock:
+            self._tune_revision += 1
         self.retune_event.set()
 
     def request_tune(self, channel_slug: str) -> None:
         with self.channel_lock:
             self.channel_slug = channel_slug
+            self._tune_revision += 1
         self.retune_event.set()
 
     def stop(self) -> None:

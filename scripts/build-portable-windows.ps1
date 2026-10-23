@@ -1,10 +1,11 @@
 param(
     [string]$Python = '.venv\Scripts\python.exe',
-    [string]$Output = 'dist\release-candidate-0.9.55\CRTV-Sim-Portable-0.9.55',
+    [string]$Output = 'dist\release-candidate-0.9.56\CRTV-Sim-Portable-0.9.56',
     [string]$MediaRoot = '../Videos/media',
     [switch]$SkipArchive,
     [switch]$InternalBuild,
     [switch]$SkipSmokeTests,
+    [string]$ReuseBuild = '',
     [string]$MediaCache = '.build\windows-media'
 )
 
@@ -68,56 +69,75 @@ function Write-Utf8NoBom {
 Write-Output 'Installing the portable build dependency...'
 & $Python -m pip install -r (Join-Path $projectRoot 'requirements.lock') -r (Join-Path $projectRoot 'requirements-build.lock')
 if ($LASTEXITCODE -ne 0) { throw 'Portable build dependencies could not be installed.' }
+$packageInputs = (& $Python (Join-Path $projectRoot 'scripts\release_reuse.py') fingerprint).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Unable to fingerprint release inputs.' }
+$frozenInputs = (& $Python (Join-Path $projectRoot 'scripts\release_reuse.py') fingerprint --frozen).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Unable to fingerprint compilation inputs.' }
+if (-not $ReuseBuild) {
+    $ReuseBuild = (& $Python (Join-Path $projectRoot 'scripts\release_reuse.py') find-frozen --fingerprint $frozenInputs | Out-String).Trim()
+} else {
+    $ReuseBuild = if ([IO.Path]::IsPathRooted($ReuseBuild)) { [IO.Path]::GetFullPath($ReuseBuild) } else { [IO.Path]::GetFullPath((Join-Path $projectRoot $ReuseBuild)) }
+    & $Python (Join-Path $projectRoot 'scripts\release_reuse.py') check-frozen --output $ReuseBuild --fingerprint $frozenInputs
+    if ($LASTEXITCODE -eq 2) { $ReuseBuild = '' }
+    elseif ($LASTEXITCODE -ne 0) { throw 'Unable to validate frozen build reuse.' }
+}
+if ($ReuseBuild -and -not $ReuseBuild.StartsWith($distRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Reusable builds must be clean builds inside dist.'
+}
 Write-Output 'Verifying pinned media packages and corresponding-source evidence...'
 & $Python (Join-Path $projectRoot 'scripts\windows_toolchain.py') verify @evidenceArgs
 if ($LASTEXITCODE -ne 0) { throw 'Media source evidence is incomplete or inconsistent. Public packaging stopped before freezing.' }
 
-$workRoot = Join-Path $projectRoot '.build\portable-windows'
-if (Test-Path -LiteralPath $workRoot) {
-    $resolvedWork = [IO.Path]::GetFullPath($workRoot)
-    if (-not $resolvedWork.StartsWith([IO.Path]::GetFullPath((Join-Path $projectRoot '.build')), [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Unsafe build work path: $resolvedWork"
+if (-not $ReuseBuild) {
+    $workRoot = Join-Path $projectRoot '.build\portable-windows'
+    if (Test-Path -LiteralPath $workRoot) {
+        $resolvedWork = [IO.Path]::GetFullPath($workRoot)
+        if (-not $resolvedWork.StartsWith([IO.Path]::GetFullPath((Join-Path $projectRoot '.build')), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unsafe build work path: $resolvedWork"
+        }
+        Remove-Item -LiteralPath $resolvedWork -Recurse -Force
     }
-    Remove-Item -LiteralPath $resolvedWork -Recurse -Force
+    New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
+
+    Write-Output 'Freezing CRTV Sim and RetroWeather...'
+    # PyInstaller resolves native dependencies from PATH too. Do not accidentally
+    # bundle DLLs from unrelated installed applications (e.g. Poppler/Conda tools).
+    $pythonBase = (& $Python -c 'import sys; print(sys.base_prefix)').Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to identify the selected Python runtime.' }
+    $env:CRTV_BUILD_GIT = (Get-Command git -ErrorAction Stop).Source
+    $env:PATH = @((Split-Path -Parent ([IO.Path]::GetFullPath($Python))), $pythonBase, (Join-Path $pythonBase 'DLLs'), (Join-Path $pythonBase 'Library\bin'), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot) -join ';'
+    & $Python -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --windowed `
+        --name CRTV-Sim `
+        --distpath (Join-Path $workRoot 'dist') `
+        --workpath (Join-Path $workRoot 'work') `
+        --specpath (Join-Path $workRoot 'spec') `
+        --paths (Join-Path $projectRoot 'src') `
+        --paths (Join-Path $projectRoot 'RetroWeather\src') `
+        --collect-all tzdata `
+        --collect-all truststore `
+        --collect-all breeze_blue `
+        --collect-data certifi `
+        (Join-Path $projectRoot 'src\retrotv\portable.py')
+    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
+
+    Write-Output 'Freezing the standalone safe-stop control...'
+    & $Python -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --windowed `
+        --name CRTV-Sim-Safe-Stop `
+        --distpath (Join-Path $workRoot 'dist') `
+        --workpath (Join-Path $workRoot 'work') `
+        --specpath (Join-Path $workRoot 'spec') `
+        --paths (Join-Path $projectRoot 'src') `
+        (Join-Path $projectRoot 'src\retrotv\safe_stop.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Safe-stop PyInstaller build failed.' }
+} else {
+    Write-Output "Reusing matching, hash-verified compiled application: $ReuseBuild"
 }
-New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
-
-Write-Output 'Freezing CRTV Sim and RetroWeather...'
-# PyInstaller resolves native dependencies from PATH too. Do not accidentally
-# bundle DLLs from unrelated installed applications (e.g. Poppler/Conda tools).
-$pythonBase = (& $Python -c 'import sys; print(sys.base_prefix)').Trim()
-if ($LASTEXITCODE -ne 0) { throw 'Unable to identify the selected Python runtime.' }
-$env:CRTV_BUILD_GIT = (Get-Command git -ErrorAction Stop).Source
-$env:PATH = @((Split-Path -Parent ([IO.Path]::GetFullPath($Python))), $pythonBase, (Join-Path $pythonBase 'DLLs'), (Join-Path $pythonBase 'Library\bin'), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot) -join ';'
-& $Python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --windowed `
-    --name CRTV-Sim `
-    --distpath (Join-Path $workRoot 'dist') `
-    --workpath (Join-Path $workRoot 'work') `
-    --specpath (Join-Path $workRoot 'spec') `
-    --paths (Join-Path $projectRoot 'src') `
-    --paths (Join-Path $projectRoot 'RetroWeather\src') `
-    --collect-all tzdata `
-    --collect-all truststore `
-    --collect-all breeze_blue `
-    --collect-data certifi `
-    (Join-Path $projectRoot 'src\retrotv\portable.py')
-if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
-
-Write-Output 'Freezing the standalone safe-stop control...'
-& $Python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --windowed `
-    --name CRTV-Sim-Safe-Stop `
-    --distpath (Join-Path $workRoot 'dist') `
-    --workpath (Join-Path $workRoot 'work') `
-    --specpath (Join-Path $workRoot 'spec') `
-    --paths (Join-Path $projectRoot 'src') `
-    (Join-Path $projectRoot 'src\retrotv\safe_stop.py')
-if ($LASTEXITCODE -ne 0) { throw 'Safe-stop PyInstaller build failed.' }
 
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 $packagedUserData = Join-Path $outputRoot 'user-data'
@@ -128,12 +148,14 @@ if (Test-Path -LiteralPath $packagedUserData) {
     }
     Remove-Item -LiteralPath $resolvedUserData -Recurse -Force
 }
-$frozen = Join-Path $workRoot 'dist\CRTV-Sim'
-Copy-Item -LiteralPath (Join-Path $frozen 'CRTV-Sim.exe') -Destination (Join-Path $outputRoot 'CRTV-Sim.exe') -Force
-Copy-TreeReplace -Source (Join-Path $frozen '_internal') -Destination (Join-Path $outputRoot '_internal')
-$safeStopFrozen = Join-Path $workRoot 'dist\CRTV-Sim-Safe-Stop'
-Copy-Item -LiteralPath (Join-Path $safeStopFrozen 'CRTV-Sim-Safe-Stop.exe') -Destination (Join-Path $outputRoot 'CRTV-Sim-Safe-Stop.exe') -Force
-Copy-TreeMissing -Source (Join-Path $safeStopFrozen '_internal') -Destination (Join-Path $outputRoot '_internal')
+$frozen = if ($ReuseBuild) { $ReuseBuild } else { Join-Path $workRoot 'dist\CRTV-Sim' }
+if ($frozen -ne $outputRoot) {
+    Copy-Item -LiteralPath (Join-Path $frozen 'CRTV-Sim.exe') -Destination (Join-Path $outputRoot 'CRTV-Sim.exe') -Force
+    Copy-TreeReplace -Source (Join-Path $frozen '_internal') -Destination (Join-Path $outputRoot '_internal')
+    $safeStopFrozen = if ($ReuseBuild) { $ReuseBuild } else { Join-Path $workRoot 'dist\CRTV-Sim-Safe-Stop' }
+    Copy-Item -LiteralPath (Join-Path $safeStopFrozen 'CRTV-Sim-Safe-Stop.exe') -Destination (Join-Path $outputRoot 'CRTV-Sim-Safe-Stop.exe') -Force
+    Copy-TreeMissing -Source (Join-Path $safeStopFrozen '_internal') -Destination (Join-Path $outputRoot '_internal')
+}
 Copy-TreeReplace -Source (Join-Path $projectRoot 'assets') -Destination (Join-Path $outputRoot 'assets')
 Copy-TreeReplace -Source (Join-Path $projectRoot 'migrations') -Destination (Join-Path $outputRoot 'migrations')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'pyproject.toml') -Destination (Join-Path $outputRoot 'pyproject.toml') -Force
@@ -163,6 +185,8 @@ $runtimeArgs = @('--output', $outputRoot)
 if ($InternalBuild) { $runtimeArgs += '--internal' }
 & $Python (Join-Path $projectRoot 'scripts\microsoft_runtime.py') @runtimeArgs
 if ($LASTEXITCODE -ne 0) { throw 'Microsoft runtime redistribution evidence is incomplete.' }
+& $Python (Join-Path $projectRoot 'scripts\release_reuse.py') record-frozen --output $outputRoot --fingerprint $frozenInputs
+if ($LASTEXITCODE -ne 0) { throw 'Compiled application input verification failed.' }
 
 $defaultsConfig = Join-Path $outputRoot 'portable-defaults\user-data\config'
 New-Item -ItemType Directory -Path $defaultsConfig -Force | Out-Null
@@ -190,13 +214,22 @@ if ($LASTEXITCODE -ne 0) { throw 'Public defaults preparation failed.' }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.ps1') -Destination (Join-Path $distRoot "Rollback-CRTV-Sim-$packageVersion.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\rollback-internet-media.cmd') -Destination (Join-Path $distRoot "Rollback-CRTV-Sim-$packageVersion.cmd") -Force
 if (-not $SkipArchive) {
-    & $Python (Join-Path $projectRoot 'scripts\windows_toolchain.py') sources --output $outputRoot --version $packageVersion @evidenceArgs
-    if ($LASTEXITCODE -ne 0) { throw 'Matching source archive could not be prepared.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $outputRoot 'SOURCE-DOWNLOADS.json'))) {
+        & $Python (Join-Path $projectRoot 'scripts\windows_toolchain.py') sources --output $outputRoot --version $packageVersion @evidenceArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Matching source archive could not be prepared.' }
+    } else {
+        Write-Output 'Reusing hash-matched published third-party sources; preparing current build materials only.'
+    }
     & $Python (Join-Path $projectRoot 'scripts\prepare-distribution.py') @prepareArgs --archive
     if ($LASTEXITCODE -ne 0) { throw 'Public archive verification failed.' }
 }
 if (-not $SkipSmokeTests) {
-    & $Python (Join-Path $projectRoot 'scripts\check-media-tools.py') $outputRoot
+    $checkLogRoot = Join-Path $projectRoot '.test-tmp'
+    New-Item -ItemType Directory -Path $checkLogRoot -Force | Out-Null
+    $checkId = [guid]::NewGuid().ToString('N')
+    $mediaCheckLog = Join-Path $checkLogRoot ("media-checks-$checkId.log")
+    $zipCheckLog = Join-Path $checkLogRoot ("zip-checks-$checkId.log")
+    & $Python (Join-Path $projectRoot 'scripts\check-media-tools.py') $outputRoot 2>&1 | Tee-Object -FilePath $mediaCheckLog
     if ($LASTEXITCODE -ne 0) { throw 'Bundled media capability tests failed.' }
     $smokeRoot = Join-Path $projectRoot ('.test-tmp\portable-release-smoke-' + [guid]::NewGuid().ToString('N'))
     $smokeArgs = @('--build', $outputRoot, '--root', $smokeRoot)
@@ -206,8 +239,14 @@ if (-not $SkipSmokeTests) {
         $windowsArchive = Join-Path (Split-Path -Parent $outputRoot) ('CRTV-Sim-' + $archiveVersion + '-Windows.zip')
         $smokeArgs += @('--archive', $windowsArchive)
     }
-    & $Python (Join-Path $projectRoot 'scripts\smoke-distribution.py') @smokeArgs
+    & $Python (Join-Path $projectRoot 'scripts\smoke-distribution.py') @smokeArgs 2>&1 | Tee-Object -FilePath $zipCheckLog
     if ($LASTEXITCODE -ne 0) { throw 'Extracted portable application smoke test failed.' }
+    & $Python (Join-Path $projectRoot 'scripts\release_reuse.py') remember-frozen --output $outputRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Verified compiled build could not be cached.' }
+    if (-not $InternalBuild -and -not $SkipArchive) {
+        & $Python (Join-Path $projectRoot 'scripts\release_reuse.py') record-validation --output $outputRoot --fingerprint $packageInputs --version $packageVersion --media-log $mediaCheckLog --smoke-log $zipCheckLog
+        if ($LASTEXITCODE -ne 0) { throw 'Release inputs changed or validation record failed.' }
+    }
 }
 
 $size = (Get-ChildItem -LiteralPath $outputRoot -File -Recurse | Measure-Object Length -Sum).Sum

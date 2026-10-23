@@ -126,6 +126,17 @@ class GeneratedAssetCleanupTests(unittest.TestCase):
         )
         self.connection.commit()
 
+    def test_loading_cover_cache_expires_without_removing_recent_frames(self):
+        now=time.time()
+        root=self.config.storage_root('state')/'generated/iptv-covers'
+        root.mkdir(parents=True)
+        old=root/'old.bgra';old.write_bytes(b'cached')
+        partial=root/'abandoned.partial.bgra';partial.write_bytes(b'partial')
+        recent=root/'recent.bgra';recent.write_bytes(b'recent')
+        for path in [old,partial]:os.utime(path,(now-7200,now-7200))
+        GeneratedAssetCleanup(self.connection,self.config).run(force=True,now=now)
+        self.assertFalse(old.exists());self.assertFalse(partial.exists());self.assertTrue(recent.exists())
+
     def test_cleanup_prunes_expired_cache_and_protects_active_outputs(self):
         now = time.time()
         active = self.announcements / "opportunity-1-active-silent.mp4"

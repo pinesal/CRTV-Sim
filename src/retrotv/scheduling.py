@@ -16,6 +16,7 @@ from retrotv.db import utc_now
 from retrotv.iptv import IPTVService
 from retrotv.blocks import BlockService
 from retrotv.breakpoints import BreakpointAnalyzer
+from retrotv.program_timing import normal_package_ms
 from retrotv.bumper_cues import effective_bumper_cue, series_matches, configured_bumper_clues
 from retrotv.graphics import GraphicsService
 from retrotv.recurring_scopes import ScopePlacement, allocate_recurring_scopes
@@ -2537,11 +2538,8 @@ class ScheduleBuilder:
         remaining_ms: int,
     ) -> int:
         program_ms = sum(item.duration_ms for item in programs)
-        if program_ms <= self.short_program_slot_ms:
-            target = self.short_program_slot_ms
-        else:
-            quantum = self.clock_slot_minutes * 60_000
-            target = ((program_ms + quantum - 1) // quantum) * quantum
+        target = normal_package_ms(program_ms, self.clock_slot_minutes * 60_000,
+                                   self.short_program_slot_ms)
         if target <= remaining_ms:
             return target
         # A daypart or special-window boundary can be shorter than the normal

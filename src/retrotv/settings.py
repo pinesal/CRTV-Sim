@@ -5,13 +5,15 @@ import copy
 import json
 import os
 import re
+import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from retrotv.credentials import configured_breeze_api_key, configured_openai_api_key
 from retrotv.processing import PRESETS, resolution_preset
-from retrotv.classification import resolve_channel_root
+from retrotv.classification import resolve_channel_root, slugify
 from retrotv.config import AppConfig
 from retrotv.holiday_review import clue_settings, validate_clue_lists
 
@@ -107,10 +109,10 @@ SETTING_FIELDS = (
     _field("scheduling.opening_bumper_enabled", "Open blocks with a bumper", "Scheduling", "boolean"),
     _field("scheduling.midroll_enabled", "Insert mid-program commercial breaks", "Act breaks", "boolean"),
     _field("scheduling.midroll_min_media_minutes", "Minimum program length (minutes)", "Act breaks", min=1, max=240),
-    _field("scheduling.midroll_search_window_minutes", "Natural-break search window (minutes)", "Act breaks", min=0.25, max=30, step=0.25),
+    _field("scheduling.midroll_search_window_minutes", "Preferred break search window (minutes)", "Act breaks", min=0.25, max=30, step=0.25, help="Strong natural cues may be selected outside this window. Held cards and fallback cuts stay within it; minimum segment spacing always applies."),
     _field("scheduling.midroll_min_segment_minutes", "Minimum segment length (minutes)", "Act breaks", min=1, max=60),
     _field("scheduling.midroll_max_pod_minutes", "Maximum episode-break ad pod (minutes)", "Act breaks", min=0.5, max=30, step=0.5),
-    _field("scheduling.midroll_fallback", "When no natural break is found", "Act breaks", "select", options=["midpoint", "none"]),
+    _field("scheduling.midroll_fallback", "When no natural break is found", "Act breaks", "select", options=["midpoint", "none"], help="Fallbacks try a complete 1.5-second quiet pause, then a scene transition without silence, then midpoint. Natural and held-card cues remain available when fallbacks are disabled."),
     _field("blocks.selection_probability", "Complete-block selection probability", "Complete blocks", min=0, max=1, step=0.05),
     _field("blocks.maximum_per_daypart", "Maximum complete blocks per daypart", "Complete blocks", min=0, max=20),
     _field("blocks.repeat_cooldown_days", "Complete-block repeat cooldown (days)", "Complete blocks", min=0, max=365),
@@ -543,6 +545,7 @@ class SettingsService:
         self,
         overrides: dict[str, Any],
         windows: dict[str, dict[str, Any]],
+        *, existing_channels_only: bool = False,
     ) -> tuple[list[str], list[str]]:
         raw_media_root = _get_path(
             overrides,
@@ -563,6 +566,7 @@ class SettingsService:
         created: list[str] = []
         collection_roots: list[str] = []
         seen: set[tuple[str, str]] = set()
+        pending_folders = self._pending_channel_folders()
         for window in windows.values():
             channel = window["channel"]
             collection = window["collection"]
@@ -571,6 +575,8 @@ class SettingsService:
                 continue
             seen.add(key)
             channel_root = resolve_channel_root(media_root, channel)
+            if not channel_root.is_dir() and (existing_channels_only or slugify(channel) in pending_folders):
+                continue
             collection_root = (
                 channel_root / "specials" / "weekly" / collection
             ).resolve()
@@ -600,6 +606,7 @@ class SettingsService:
         dayparts: list[dict[str, Any]],
         *,
         overrides: dict[str, Any] | None = None,
+        existing_channels_only: bool = False,
     ) -> list[str]:
         raw_root = _get_path(overrides or {}, "storage_roots.media", self.config.data.get("storage_roots", {}).get("media"))
         if not raw_root:
@@ -617,6 +624,7 @@ class SettingsService:
         created: list[str] = []
         holiday_slugs = set(holidays)
         holiday_slugs.update(str(value) for value in self.config.data.get("graphics", {}).get("holidays", []))
+        pending_folders = self._pending_channel_folders()
         for channel in sorted(channels):
             if not channel:
                 continue
@@ -625,6 +633,8 @@ class SettingsService:
                 if channel == "_channel_template"
                 else resolve_channel_root(media_root, channel)
             )
+            if channel != "_channel_template" and not channel_root.is_dir() and (existing_channels_only or slugify(channel) in pending_folders):
+                continue
             collections = {str(item.get("collection", "")) for item in windows.values()
                            if isinstance(item, dict) and str(item.get("channel")) == channel}
             for holiday in sorted(holiday_slugs):
@@ -660,6 +670,16 @@ class SettingsService:
                     target.mkdir(parents=True)
                     created.append(str(target))
         return created
+
+    def _pending_channel_folders(self) -> set[str]:
+        if not self.config.database_path.is_file():
+            return set()
+        # Settings can be used before first-run database migrations.
+        with closing(sqlite3.connect(self.config.database_path.as_uri() + "?mode=ro", uri=True)) as connection:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_folder_state'").fetchone():
+                return set()
+            return {row[0] for row in connection.execute("""SELECT c.slug FROM channel_folder_state s
+                JOIN channels c ON c.id=s.channel_id WHERE s.missing_since IS NOT NULL""")}
 
     @staticmethod
     def _coerce(field: dict[str, Any], raw: Any) -> Any:

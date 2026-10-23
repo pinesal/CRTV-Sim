@@ -156,8 +156,7 @@ class LibraryScanner:
 
     def _sync_channels_from_folders(self, root: Path) -> tuple[int, int, int]:
         library = self.config.data.get("library", {})
-        if not bool(library.get("auto_register_channels", True)):
-            return 0, 0, 0
+        auto_register = bool(library.get("auto_register_channels", True))
 
         discovered: dict[str, str] = {}
         for path in sorted(root.iterdir(), key=lambda item: item.name.casefold()):
@@ -213,6 +212,8 @@ class LibraryScanner:
             configured_number = configured_numbers.get(slug)
             row = existing.get(slug)
             if row is None:
+                if not auto_register:
+                    continue
                 number = (
                     configured_number
                     if configured_number is not None
@@ -228,6 +229,8 @@ class LibraryScanner:
                 )
                 created += 1
             else:
+                if not auto_register:
+                    continue
                 if not bool(row["enabled"]):
                     enabled += 1
                 self.connection.execute(
@@ -240,12 +243,29 @@ class LibraryScanner:
                     (configured_number, row["id"]),
                 )
 
+        # Record the actual spelling before a folder disappears. This is also
+        # kept for feed/external channels that happen to have a managed folder.
+        for slug, folder_name in discovered.items():
+            self.connection.execute("""INSERT INTO channel_folder_state(channel_id,folder_name,missing_since)
+                SELECT id,?,NULL FROM channels WHERE slug=?
+                ON CONFLICT(channel_id) DO UPDATE SET folder_name=excluded.folder_name,missing_since=NULL""",
+                (folder_name, slug))
+
+        remote_channels = {row[0] for row in self.connection.execute("SELECT channel_slug FROM external_assignments e JOIN storage_roots r ON r.id=e.root_id WHERE e.enabled=1 AND r.enabled=1")}
+        remote_channels.update(row[0] for row in self.connection.execute("SELECT a.channel_slug FROM iptv_assignments a JOIN iptv_feeds f ON f.id=a.feed_id WHERE f.enabled=1"))
+        tracked = {row[0] for row in self.connection.execute("SELECT channel_id FROM channel_folder_state")}
+        for slug, row in existing.items():
+            if slug in {"weather", "__guide__"} or slug in discovered or (slug in remote_channels and row["id"] not in tracked):
+                continue
+            self.connection.execute("""INSERT INTO channel_folder_state(channel_id,folder_name,missing_since)
+                VALUES (?,?,?) ON CONFLICT(channel_id) DO UPDATE SET
+                missing_since=COALESCE(channel_folder_state.missing_since,excluded.missing_since)""",
+                (row["id"], slug, utc_now()))
+
         disabled = 0
-        if bool(library.get("auto_disable_missing_channels", True)):
-            external_channels = {row[0] for row in self.connection.execute("SELECT channel_slug FROM external_assignments e JOIN storage_roots r ON r.id=e.root_id WHERE e.enabled=1 AND r.enabled=1")}
-            external_channels.update(row[0] for row in self.connection.execute("SELECT a.channel_slug FROM iptv_assignments a JOIN iptv_feeds f ON f.id=a.feed_id WHERE f.enabled=1"))
+        if auto_register and bool(library.get("auto_disable_missing_channels", True)):
             missing = [
-                row for slug, row in existing.items() if slug not in discovered and slug not in external_channels
+                row for slug, row in existing.items() if slug not in discovered and slug not in remote_channels
             ]
             for row in missing:
                 if bool(row["enabled"]):
@@ -256,7 +276,7 @@ class LibraryScanner:
                 )
 
         self.connection.commit()
-        self.known_channels.update(discovered)
+        self.known_channels.update(discovered if auto_register else set(discovered) & set(existing))
         return created, enabled, disabled
 
     def discover(self, root: Path) -> Iterable[Path]:
@@ -564,6 +584,8 @@ class LibraryScanner:
         if not root.is_dir():
             raise FileNotFoundError(f"Media root does not exist: {root}")
         root_id = ensure_storage_root(self.connection, logical_root)
+        # Folder discovery can block on a drive: never carry this write into it.
+        self.connection.commit()
         channel_counts = (
             self._sync_channels_from_folders(root)
             if logical_root == "media"
@@ -665,6 +687,8 @@ class LibraryScanner:
             FROM assets
             WHERE source_root_id = ?
               AND (last_scan_run_id IS NULL OR last_scan_run_id <> ?)
+              AND NOT EXISTS (SELECT 1 FROM channel_folder_state s JOIN channels c ON c.id=s.channel_id
+                  WHERE c.slug=assets.channel_slug AND s.missing_since IS NOT NULL)
             """,
             (root_id, scan_run_id),
         ).fetchall()

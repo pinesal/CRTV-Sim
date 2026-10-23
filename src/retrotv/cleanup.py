@@ -63,6 +63,10 @@ class GeneratedAssetCleanup:
             summary, protected, moment, temporary_hours * 3600
         )
         self._prune_act_break_previews(summary, protected, moment, temporary_hours * 3600)
+        cover_root = self.state_generated / 'iptv-covers'
+        if cover_root.is_dir() and not cover_root.is_symlink():
+            for frame in cover_root.glob('*.bgra'):
+                self._remove_if_old(frame, summary, protected, moment, temporary_hours * 3600)
         self._prune_guides(summary, protected)
         self._prune_announcements(summary, protected, moment)
         self._prune_graphics(summary, protected, moment)

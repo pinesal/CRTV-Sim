@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "repository": "pinesal/CRTV-Sim",
+  "source_bundles": [
+    {
+      "compatibility": {
+        "media": "edce2d367de88f663e6344bc06286e623d593c06b974612d0bb6f0e517cbb07c",
+        "native": "fce8ea977cbd5cae8b70c3e989d946a82104c954a47621a230104118937fc11f",
+        "python_sources": "c3b9523f8c697159a9bbe07ad97a720d380bb3e3adbaf977776a9f06bac8da7b",
+        "locks": {
+          "packaging/windows-media.lock.json": "418bf0f29b08193d677ac7f856369f31769d34db2bab1e1642293264580186ef",
+          "packaging/microsoft-runtime.lock.json": "19814b0a70a85e5e73373f422a5776050b7a77b1f3d201f5b1b72547c47d9a7b",
+          "requirements.lock": "bfb9d15a2e4deccd331fc3f1ef06357c318813ce60421b182dc282dd4a7fb8bd",
+          "requirements-build.lock": "24916ecf4829dc86e64d266d2dddc52731c3d9697d65e3e49a4d0d987a43e927"
+        }
+      },
+      "assets": [
+        {
+          "name": "CRTV-Sim-0.9.55-ThirdParty-Sources.zip",
+          "tag": "v0.9.55",
+          "url": "https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.55/CRTV-Sim-0.9.55-ThirdParty-Sources.zip",
+          "sha256": "db1de62a0adee2b0c9c065e9a6d6a80dc701e220042c5b19c10acd5f9ca6e8e5",
+          "size": 1519856867
+        },
+        {
+          "name": "CRTV-Sim-0.9.55-ThirdParty-Build-Inputs.zip",
+          "tag": "v0.9.55",
+          "url": "https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.55/CRTV-Sim-0.9.55-ThirdParty-Build-Inputs.zip",
+          "sha256": "82eaa329f8397c15fe6ef2a2e5609e818eeffee76d6fc1893f6f6e519dbd85ca",
+          "size": 987093645
+        }
+      ]
+    }
+  ],
+  "media_packs": [
+    {
+      "name": "CRTV-Sim-Example-Channel-Classic-Comedy.zip",
+      "tag": "v0.9.55",
+      "url": "https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.55/CRTV-Sim-Example-Channel-Classic-Comedy.zip",
+      "sha256": "da0b5ca17f402e8096791ab9118c36c023c8656a21264c42d52b948d811d53ac",
+      "size": 289856311
+    },
+    {
+      "name": "CRTV-Sim-Optional-Music-Pack.zip",
+      "tag": "v0.9.55",
+      "url": "https://github.com/pinesal/CRTV-Sim/releases/download/v0.9.55/CRTV-Sim-Optional-Music-Pack.zip",
+      "sha256": "321b10b01d3d5f3979f8817946e88e235bd33a6a23e0c4ba49fb66530c7ca06e",
+      "size": 12436215
+    }
+  ]
+}

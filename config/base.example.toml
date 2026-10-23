@@ -136,9 +136,12 @@ sequence_template = ["bumper", "commercial_break", "bumper", "episode"]
 opening_bumper_enabled = true
 midroll_enabled = true
 midroll_min_media_minutes = 15
+# Preferred window for held-card/fallback cuts; strong natural cues may lie outside.
 midroll_search_window_minutes = 4
 midroll_min_segment_minutes = 5
 midroll_max_pod_minutes = 5
+# "midpoint" enables quiet-pause (>=1.5s), scene-transition, then midpoint fallbacks.
+# "none" retains natural and qualifying held-card cues only.
 midroll_fallback = "midpoint"
 midroll_media_types = ["episode", "movie"]
 

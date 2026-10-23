@@ -64,9 +64,9 @@ other project documents describe the detailed technical design and operation.
 ## Requirements
 
 Windows users should download the portable beta from
-[GitHub Releases](https://github.com/pinesal/CRTV-Sim/releases/tag/v0.9.55).
+[GitHub Releases](https://github.com/pinesal/CRTV-Sim/releases/tag/v0.9.56).
 FFmpeg, FFprobe, mpv and Python are included; no developer setup is needed.
-**To use the program, download only `CRTV-Sim-0.9.55-Windows.zip`.**
+**To use the program, download only `CRTV-Sim-0.9.56-Windows.zip`.**
 The third-party sources, build inputs, checksums and GitHub's automatic source-code
 downloads are optional; none is required to install or run CRTV Sim. Checksums
 are available if you want to verify a download.
@@ -1422,8 +1422,24 @@ The Internet Media page can delete either kind of channel after an exact typed
 confirmation and a separate acknowledgement. Deletion removes the channel's
 database records, source sidecars, and unfinished downloads. Finished source
 media, normalized media, backups, and completed cache files remain untouched.
+The application queues confirmed deletions outside the media database, waits
+for active work, and retries temporary SQLite contention automatically. The
+**Channel folders and queued deletions** panel on Library and Internet Media
+shows progress; queued/waiting jobs can be cancelled before they start. Requests
+survive restarts and identify a specific channel instance. Tune away from a
+channel being watched before its deletion can finish.
 No ignore marker is created: if the channel folder remains, the normal scanner
 will recreate the channel with Scheduled defaults on a later scan.
+
+After a successful folder scan, a missing channel folder appears in that same
+review panel. **Recreate folders** restores the empty folder template without
+restoring deleted videos; **Review deletion** opens the normal confirmation.
+Scans retain the channel's catalog records pending this choice and do not
+silently recreate missing roots. A returning folder clears its review on the
+next scan. An unavailable media root produces an availability warning, not
+missing-folder deletion suggestions. Channels that only use external files or
+IPTV need no managed folder; a folder is reviewed for them only if a previous
+scan actually saw it.
 
 Portable launches mark each configured drive as CRTV Sim production storage. A
 development profile that points at a marked drive warns before opening its

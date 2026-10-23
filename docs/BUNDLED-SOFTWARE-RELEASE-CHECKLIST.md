@@ -35,10 +35,13 @@ for the evidence and component license boundaries.
 - Require zero problems in THIRD-PARTY-MANIFEST.json and the source manifest.
   Retain full Rust vendor inputs, incorporated-source coverage, original notices
   and Microsoft grant evidence; never waive missing materials with a flag.
-- Upload the Windows ZIP, same-version ThirdParty-Sources and
-  ThirdParty-Build-Inputs ZIPs and SHA256SUMS
-  together. Put a source link next to the binary link in release notes and any
-  download page. Preserve source availability under the applicable license terms.
+- Upload the Windows ZIP and checksums with either newly verified matching
+  source archives or hash-verified links to already published matching archives.
+  Reuse is bound to the actual media/runtime/Python inputs, not app version labels.
+  Supply changed build recipes/notices in the small current Build-Materials ZIP.
+  Put the actual source links next to the binary link in release notes and any
+  download page, and retain all referenced downloads for the required period.
+  See [Release workflow](RELEASE_WORKFLOW.md). Never reuse mismatched or missing sources.
 - Keep complete upstream licenses, notices, recipes, patches and source-to-binary
   mapping; document modifications (none to these media executables by CRTV Sim).
 - Assess codec patents, libdvdcss/anti-circumvention and Microsoft redistribution

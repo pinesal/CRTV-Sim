@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -15,6 +16,11 @@ from retrotv.breakpoints import BreakpointAnalyzer
 from retrotv.config import AppConfig
 from retrotv.db import apply_migrations, connect_database, ensure_storage_root, utc_now
 from retrotv.web import make_handler
+
+
+def shift_window_log(text):
+    return re.sub(r'(freeze_start:\s*|freeze_end:\s*|black_start:|black_end:|silence_start:\s*|silence_end:\s*|pts_time:\s*)(-?[0-9.]+)',
+                  lambda m: m[1] + str(float(m[2]) + 166), text)
 
 
 class BreakpointTests(unittest.TestCase):
@@ -78,7 +84,7 @@ class BreakpointTests(unittest.TestCase):
             ]
         )
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value=output):
+        with patch.object(service, "_run_detection", return_value=shift_window_log(output)):
             result = service.analyze_asset(1)
         # The scan starts four minutes before the 11:30 midpoint, so 239s is 11:29.
         self.assertEqual(result.method, "fade")
@@ -157,7 +163,7 @@ class BreakpointTests(unittest.TestCase):
     def test_analyzed_break_records_chapter_evidence(self):
         service = BreakpointAnalyzer(self.connection, self.config)
         output = "[blackdetect] black_start:238.0 black_end:240.0 black_duration:2.0"
-        with patch.object(service, "_run_detection", return_value=output), \
+        with patch.object(service, "_run_detection", return_value=shift_window_log(output)), \
              patch.object(service, "_chapter_starts", return_value=[689500]):
             service.analyze_asset(1)
         row = self.connection.execute(
@@ -178,25 +184,25 @@ class BreakpointTests(unittest.TestCase):
         self.assertEqual(row["status"], "error")
         self.assertIn("decode failed", row["detail"])
 
-    def test_long_episode_scans_each_twelve_minute_act_target(self):
+    def test_hour_episode_uses_three_targets_and_bounded_full_scan(self):
         self.connection.execute(
             "UPDATE asset_media_info SET duration_seconds=3600 WHERE asset_id=1"
         )
         self.connection.commit()
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value="") as detector:
+        with patch.object(service, "_run_detection", return_value=shift_window_log("")) as detector:
             result = service.analyze_asset(1)
         self.assertEqual(result.method, "midpoint")
-        self.assertEqual(service.selected_offsets(1), [720000, 1440000, 2160000, 2880000])
-        self.assertEqual(detector.call_count, 4)
+        self.assertEqual(service.selected_offsets(1), [750000, 1500000, 2550000])
+        self.assertEqual(detector.call_count, 7)
 
     def test_break_targets_scale_with_full_program_duration(self):
         service = BreakpointAnalyzer(self.connection, self.config)
         self.assertEqual(len(service.target_offsets(23 * 60_000)), 1)
-        self.assertEqual(service.target_offsets(44 * 60_000), [660000, 1500000, 2070000])
+        self.assertEqual(service.target_offsets(44 * 60_000), [750000, 1500000, 2070000])
         self.assertEqual(len(service.target_offsets(70 * 60_000)), 5)
-        self.assertEqual(len(service.target_offsets(90 * 60_000)), 7)
-        self.assertEqual(len(service.target_offsets(120 * 60_000)), 9)
+        self.assertEqual(len(service.target_offsets(90 * 60_000)), 5)
+        self.assertEqual(len(service.target_offsets(120 * 60_000)), 7)
 
     def test_prior_version_manual_break_survives_reanalysis_version_change(self):
         self.connection.execute(
@@ -243,41 +249,41 @@ class BreakpointTests(unittest.TestCase):
         self.connection.execute("UPDATE asset_media_info SET duration_seconds=2640 WHERE asset_id=1")
         self.connection.commit()
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value=""):
+        with patch.object(service, "_run_detection", return_value=shift_window_log("")):
             service.analyze_asset(1)
             service.set_manual(1, 1350000, target_index=2)
-            self.assertEqual(service.selected_offsets(1), [660000, 1350000, 2070000])
+            self.assertEqual(service.selected_offsets(1), [750000, 1350000, 2070000])
             service.reset_manual(1, 2)
-        self.assertEqual(service.selected_offsets(1), [660000, 1500000, 2070000])
+        self.assertEqual(service.selected_offsets(1), [750000, 1500000, 2070000])
 
-    def test_scene_without_silence_or_chapter_is_not_natural_break(self):
+    def test_scene_without_silence_or_chapter_is_a_fallback(self):
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value="[showinfo] pts_time:240.0"):
+        with patch.object(service, "_run_detection", return_value=shift_window_log("[showinfo] pts_time:240.0")):
             service.analyze_asset(1)
         row = self.connection.execute(
             "SELECT method,signals_json FROM asset_break_candidates WHERE asset_id=1 AND selected=1"
         ).fetchone()
-        self.assertEqual(row["method"], "midpoint")
-        self.assertIn("no natural cue", row["signals_json"])
+        self.assertEqual(row["method"], "scene_fallback")
+        self.assertIn("without silence", row["signals_json"])
 
     def test_long_programs_analyze_later_windows(self):
         service = BreakpointAnalyzer(self.connection, self.config)
-        for minutes, expected in ((70, 5), (90, 7), (120, 9)):
+        for minutes, expected in ((70, 5), (90, 5), (120, 7)):
             with self.subTest(minutes=minutes):
                 self.connection.execute(
                     "UPDATE asset_media_info SET duration_seconds=? WHERE asset_id=1",
                     (minutes * 60,),
                 )
                 self.connection.commit()
-                with patch.object(service, "_run_detection", return_value="") as detector:
+                with patch.object(service, "_run_detection", return_value=shift_window_log("")) as detector:
                     service.analyze_asset(1)
-                self.assertEqual(detector.call_count, expected)
+                self.assertEqual(detector.call_count, (minutes * 60000 - 600000 + 479999) // 480000)
                 self.assertEqual(len(service.selected_offsets(1)), expected)
 
     def test_scene_with_nearby_silence_is_selected(self):
         service = BreakpointAnalyzer(self.connection, self.config)
         output = "[silencedetect] silence_start:239.7\n[silencedetect] silence_end:240.2\n[showinfo] pts_time:240.0"
-        with patch.object(service, "_run_detection", return_value=output):
+        with patch.object(service, "_run_detection", return_value=shift_window_log(output)):
             service.analyze_asset(1)
         row = self.connection.execute(
             "SELECT method,signals_json FROM asset_break_candidates WHERE asset_id=1 AND selected=1"
@@ -287,7 +293,7 @@ class BreakpointTests(unittest.TestCase):
 
     def test_disabling_fallback_excludes_previously_recorded_midpoint(self):
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value=""):
+        with patch.object(service, "_run_detection", return_value=shift_window_log("")):
             service.analyze_asset(1)
         self.assertEqual(len(service.selected_offsets(1)), 1)
         self.config.data["scheduling"]["midroll_fallback"] = "none"
@@ -295,8 +301,8 @@ class BreakpointTests(unittest.TestCase):
 
     def test_quiet_pause_is_recorded_before_midpoint(self):
         service = BreakpointAnalyzer(self.connection, self.config)
-        output = "silence_start:239.6\nsilence_end:240.4"
-        with patch.object(service, "_run_detection", return_value=output):
+        output = "silence_start:239.2\nsilence_end:240.8"
+        with patch.object(service, "_run_detection", return_value=shift_window_log(output)):
             result = service.analyze_asset(1)
         self.assertEqual((result.method, result.offset_ms), ("quiet_pause", 690000))
         row = self.connection.execute(
@@ -304,31 +310,32 @@ class BreakpointTests(unittest.TestCase):
         ).fetchone()
         signals = json.loads(row[0])
         self.assertTrue(signals["fallback"])
-        self.assertEqual(signals["silence_duration_ms"], 800)
-        self.assertEqual(signals["silence_start_ms"], 689600)
+        self.assertEqual(signals["silence_duration_ms"], 1600)
+        self.assertEqual(signals["silence_start_ms"], 689200)
         self.assertEqual(signals["silence_threshold_db"], -35)
         self.assertEqual(service.selected_offsets(1), [690000])
 
-    def test_quiet_pause_requires_complete_unclipped_half_second(self):
+    def test_quiet_pause_requires_complete_unclipped_one_and_a_half_seconds(self):
         service = BreakpointAnalyzer(self.connection, self.config)
         for output in ("silence_start:239.8\nsilence_end:240.299",
+                       "silence_start:239.25\nsilence_end:240.749",
+                       "silence_start:239.5\nsilence_end:240.5",
                        "silence_start:0\nsilence_end:2",
                        "silence_start:479\nsilence_end:480",
                        "silence_start:479\nsilence_end:479.999",
                        "silence_start:0.001\nsilence_end:2",
                        "silence_start:240", "silence_end:240",
                        "silence_start:-1\nsilence_end:2"):
-            with self.subTest(output=output), patch.object(service, "_run_detection", return_value=output):
-                self.assertEqual(service.analyze_asset(1).method, "midpoint")
-        with patch.object(service, "_run_detection", return_value="silence_start:239.75\nsilence_end:240.25"):
-            self.assertEqual(service.analyze_asset(1).method, "quiet_pause")
+            with self.subTest(output=output):
+                self.assertEqual(service._quiet_candidates(output,450000,930000,1380000),[])
+        self.assertEqual(len(service._quiet_candidates('silence_start:239.25\nsilence_end:240.75',450000,930000,1380000)),1)
 
     def test_natural_cue_takes_precedence_over_closer_quiet_pause(self):
         service = BreakpointAnalyzer(self.connection, self.config)
         for cue in ("black_start:200 black_end:201 black_duration:1",
                     "[showinfo] pts_time:240.0"):
             output = cue + "\nsilence_start:239.6\nsilence_end:240.4"
-            with self.subTest(cue=cue), patch.object(service, "_run_detection", return_value=output):
+            with self.subTest(cue=cue), patch.object(service, "_run_detection", return_value=shift_window_log(output)):
                 self.assertIn(service.analyze_asset(1).method, {"fade", "scene"})
 
     def test_quiet_pause_ties_choose_longer_then_earlier(self):
@@ -337,13 +344,13 @@ class BreakpointTests(unittest.TestCase):
             ("silence_start:220\nsilence_end:230\nsilence_start:249\nsilence_end:261", 705000),
             ("silence_start:250\nsilence_end:260\nsilence_start:220\nsilence_end:230", 675000),
         ):
-            with self.subTest(output=output), patch.object(service, "_run_detection", return_value=output):
+            with self.subTest(output=output), patch.object(service, "_run_detection", return_value=shift_window_log(output)):
                 self.assertEqual(service.analyze_asset(1).offset_ms, expected)
 
     def test_no_fallback_policy_excludes_quiet_pause(self):
         service = BreakpointAnalyzer(self.connection, self.config)
-        output = "silence_start:239.6\nsilence_end:240.4"
-        with patch.object(service, "_run_detection", return_value=output):
+        output = "silence_start:239.2\nsilence_end:240.8"
+        with patch.object(service, "_run_detection", return_value=shift_window_log(output)):
             service.analyze_asset(1)
             self.config.data["scheduling"]["midroll_fallback"] = "none"
             self.assertEqual(service.selected_offsets(1), [])
@@ -353,39 +360,44 @@ class BreakpointTests(unittest.TestCase):
         self.connection.execute("UPDATE asset_media_info SET duration_seconds=2640 WHERE asset_id=1")
         self.connection.commit()
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value="silence_start:239.6\nsilence_end:240.4"):
+        quiet = [{'offset_ms':point,'method':'quiet_pause','score':.4,
+                  'signals':{'silence_duration_ms':1600,'fallback':True}}
+                 for point in service.target_offsets(2640000)]
+        with patch.object(service, '_collect_candidates', return_value=quiet):
             service.analyze_asset(1)
-            self.assertEqual(service.selected_offsets(1), [660000, 1500000, 2070000])
+            self.assertEqual(service.selected_offsets(1), [750000, 1500000, 2070000])
             service.set_manual(1, 1350000, target_index=2)
             self.connection.execute("UPDATE asset_break_analyses SET source_signature='5:10:breaks-v5'")
             self.connection.commit()
             service.analyze_asset(1)
-            self.assertEqual(service.selected_offsets(1), [660000, 1350000, 2070000])
+            self.assertEqual(service.selected_offsets(1), [750000, 1350000, 2070000])
             service.reset_manual(1, 2)
-            self.assertEqual(service.selected_offsets(1), [660000, 1500000, 2070000])
+            self.assertEqual(service.selected_offsets(1), [750000, 1500000, 2070000])
 
     def test_spacing_is_checked_before_choosing_a_quiet_pause(self):
         self.connection.execute("UPDATE asset_media_info SET duration_seconds=2640 WHERE asset_id=1")
         self.connection.commit()
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value=""):
+        with patch.object(service, "_run_detection", return_value=shift_window_log("")):
             service.set_manual(1, 1100000, target_index=1)
         # The first pause in target 2 is less than five minutes after the manual
         # break; select the later valid pause rather than dropping the break.
-        output = "silence_start:80\nsilence_end:81\nsilence_start:239\nsilence_end:241"
-        with patch.object(service, "_run_detection", return_value=output):
+        quiet = [{'offset_ms':point,'method':'quiet_pause','score':.4,
+                  'signals':{'silence_duration_ms':2000,'fallback':True}}
+                 for point in (1180000,1500000,2070000)]
+        with patch.object(service, '_collect_candidates', return_value=quiet):
             service.analyze_asset(1)
         self.assertEqual(service.selected_offsets(1)[1], 1500000)
 
     def test_version_five_cuts_work_while_waiting_for_reanalysis(self):
         service = BreakpointAnalyzer(self.connection, self.config)
-        with patch.object(service, "_run_detection", return_value=""):
+        with patch.object(service, "_run_detection", return_value=shift_window_log("")):
             service.analyze_asset(1)
         self.connection.execute("UPDATE asset_break_analyses SET source_signature='5:10:breaks-v5'")
         self.connection.commit()
         self.assertEqual(service.selected_offsets(1), [690000])
         self.assertEqual([row['id'] for row in service.pending_assets()], [1])
-        with patch.object(service, "_run_detection", return_value="silence_start:238\nsilence_end:239"):
+        with patch.object(service, "_run_detection", return_value=shift_window_log("silence_start:237.5\nsilence_end:239.5")):
             service.analyze_asset(1)
         self.assertEqual(service.selected_offsets(1), [688500])
         self.assertEqual(service.pending_assets(), [])
@@ -403,7 +415,7 @@ class BreakpointTests(unittest.TestCase):
             def get(status):
                 with urlopen(base + '/api/breakpoints?status=' + status) as response:
                     return json.load(response)['items']
-            with patch.object(service, '_run_detection', return_value='silence_start:239.6\nsilence_end:240.4'):
+            with patch.object(service, '_run_detection', return_value=shift_window_log('silence_start:239.2\nsilence_end:240.8')):
                 service.analyze_asset(1)
             self.assertEqual(get('fallback')[0]['series_title'], 'Show')
             self.assertEqual(get('quiet_pause')[0]['targets'][0]['selected']['method'], 'quiet_pause')
@@ -412,7 +424,7 @@ class BreakpointTests(unittest.TestCase):
             self.connection.execute("UPDATE asset_break_analyses SET source_signature='5:10:breaks-v5'")
             self.connection.commit()
             self.assertTrue(get('pending')[0]['needs_reanalysis'])
-            with patch.object(service, '_run_detection', return_value=''):
+            with patch.object(service, '_run_detection', return_value=shift_window_log('')):
                 service.analyze_asset(1)
             self.assertEqual(len(get('midpoint')), 1)
             self.assertEqual(len(get('fallback')), 1)
@@ -432,7 +444,7 @@ class BreakpointTests(unittest.TestCase):
         source = self.media / 'fox/all-day/episodes/Show/episode.mp4'
         # A tiny, low-frame-rate 23-minute file keeps the actual target and seek
         # timestamps realistic. Modulated tones approximate voiced audio.
-        audio = r'aevalsrc=if(between(t\,689.6\,690.4)\,0\,0.2*(sin(2*PI*330*t)+0.2*sin(2*PI*550*t))):s=16000:d=1380'
+        audio = r'aevalsrc=if(between(t\,689.2\,690.8)\,0\,0.2*(sin(2*PI*330*t)+0.2*sin(2*PI*550*t))):s=16000:d=1380'
         subprocess.run([self.config.ffmpeg, '-v', 'error', '-y', '-f', 'lavfi',
                         '-i', 'color=c=blue:s=160x120:r=1:d=1380', '-f', 'lavfi', '-i', audio,
                         '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
@@ -440,8 +452,8 @@ class BreakpointTests(unittest.TestCase):
                        capture_output=True)
         result = BreakpointAnalyzer(self.connection, self.config).analyze_asset(1)
         self.assertEqual(result.method, 'quiet_pause')
-        self.assertGreaterEqual(result.offset_ms, 689600)
-        self.assertLessEqual(result.offset_ms, 690400)
+        self.assertGreaterEqual(result.offset_ms, 689200)
+        self.assertLessEqual(result.offset_ms, 690800)
 
 
 if __name__ == "__main__":

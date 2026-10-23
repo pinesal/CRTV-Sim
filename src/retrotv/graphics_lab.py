@@ -48,20 +48,28 @@ def default_art_direction(channel_name: str) -> str:
 
 def build_prompt(
     *, method: str, template_set: str, channel_name: str, art_direction: str,
-    has_logo_reference: bool, purpose: str = "up-next",
+    has_logo_reference: bool, purpose: str = "up-next", include_station_name: bool = True,
 ) -> str:
     """Build an inspectable prompt with production constraints kept explicit."""
     # Channel display names are friendly labels (for example, "Pbs"), while a
     # broadcast wordmark needs the canonical all-caps identity ("PBS").
     channel = channel_name.strip().upper() or "THE STATION"
-    direction = art_direction.strip() or default_art_direction(channel)
-    generated_logo = (
-        f'Create one polished, legible station logo that reads exactly "{channel}". '
-        "This is the only readable text permitted in the artwork. Integrate it into the requested "
-        "station identity rather than placing it in an empty badge or generic frame. "
-        if not has_logo_reference
-        else "Do not generate any logo or readable text; CRTV Sim will composite the exact supplied logo locally. "
+    if not include_station_name:
+        has_logo_reference = False
+    direction = art_direction.strip() or (
+        default_art_direction(channel) if include_station_name else
+        "Create an unbranded 1990s television background with broadcast-era geometry and textured gradients."
     )
+    if not include_station_name:
+        generated_logo = "Do not generate station names, logos, wordmarks, letters, or readable text. Create only unbranded background artwork. "
+    elif has_logo_reference:
+        generated_logo = "Do not generate any logo or readable text; CRTV Sim will composite the exact supplied logo locally. "
+    else:
+        generated_logo = (
+            f'Create one polished, legible station logo that reads exactly "{channel}". '
+            "This is the only readable text permitted in the artwork. Integrate it into the requested "
+            "station identity rather than placing it in an empty badge or generic frame. "
+        )
     if purpose == "up-next":
         fixed = (
             "This is a 4:3 CRTV Sim Up Next background, not a poster. The final application "
@@ -72,15 +80,20 @@ def build_prompt(
             "pixels from the edge for CRT overscan."
         )
     elif purpose == "interstitials":
-        logo_space = (
-            "CRTV Sim will composite the exact supplied station logo at the centre after generation. "
-            "Leave that area visually calm but fully illustrated; do not draw an empty badge, "
-            "circle, plaque, frame, silhouette, blackout area, halo, or placeholder behind it. "
-            if has_logo_reference
-            else "Place the generated station logo prominently near the centre and integrate it "
-            "with the scene. Do not reserve or draw an empty centre badge, circle, plaque, frame, "
-            "silhouette, blackout area, halo, or placeholder. "
-        )
+        if not include_station_name:
+            logo_space = "Fill the frame with the background design. Do not reserve an empty logo badge, circle, frame, or placeholder. "
+        elif has_logo_reference:
+            logo_space = (
+                "CRTV Sim will composite the exact supplied station logo at the centre after generation. "
+                "Leave that area visually calm but fully illustrated; do not draw an empty badge, "
+                "circle, plaque, frame, silhouette, blackout area, halo, or placeholder behind it. "
+            )
+        else:
+            logo_space = (
+                "Place the generated station logo prominently near the centre and integrate it "
+                "with the scene. Do not reserve or draw an empty centre badge, circle, plaque, frame, "
+                "silhouette, blackout area, halo, or placeholder. "
+            )
         fixed = (
             "This is a 4:3 CRTV Sim station interstitial that holds or loops while a channel has "
             "a brief programming gap. There is no schedule-text overlay, so use the full frame "
@@ -97,6 +110,8 @@ def build_prompt(
         )
     elif method == "composition-blueprint":
         placement = "the top-centre logo zone and the location and clear readability of the central programme-text area"
+        if not include_station_name:
+            placement = "the 4:3 canvas and the clear central programme-text area"
         if purpose == "interstitials":
             placement = "only the 4:3 canvas; the deliberately blank reference contains no logo shape or placeholder"
         reference = (
@@ -485,6 +500,11 @@ class GraphicsLab:
         quality = str(payload.get("quality", "low")).strip().casefold()
         if quality not in {"low", "medium", "high", "auto"}:
             raise ValueError("Choose low, medium, high, or auto quality")
+        include_station_name = payload.get("include_station_name", True)
+        if not isinstance(include_station_name, bool):
+            raise ValueError("Include station name must be true or false")
+        if not include_station_name and payload.get("logo") is not None:
+            raise ValueError("Remove the logo reference when requesting unbranded artwork")
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:12]
         run = self.root / run_id
         # Windows maps the POSIX ``mode`` argument to an ACL. A restrictive
@@ -495,6 +515,7 @@ class GraphicsLab:
         prompt = build_prompt(
             method=method, template_set=template_set, channel_name=channel_name, art_direction=art_direction,
             has_logo_reference=logo is not None, purpose=purpose,
+            include_station_name=include_station_name,
         )
         client = OpenAIHTTPClient()
         if not client.available:
@@ -556,6 +577,7 @@ class GraphicsLab:
             "template_set": template_set,
             "purpose": purpose,
             "channel_name": channel_name,
+            "include_station_name": include_station_name,
             "model": model,
             "quality": quality,
             "prompt": prompt,

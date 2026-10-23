@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
-from retrotv.iptv import IPTVService, inspect_url, stream_url, SafeRedirect
+from retrotv.iptv import IPTVService, inspect_url, stream_url, SafeRedirect, select_feed
 from retrotv.scheduling import ScheduleBuilder
 from retrotv.guide import GuideService
 from retrotv.playback import ScheduleResolver
@@ -121,7 +121,9 @@ class IPTVTests(unittest.TestCase):
             InternetMediaService(self.connection,self.config).configure_channel({'slug':'fox','display_name':'FOX','playback_mode':'watch_at_your_pace'})
 
     def test_new_channel_removal_and_stable_locked_schedule(self):
-        feed=self.add(new_channel='Live Channel')
+        service=self.service()
+        payload={'url':'http://lan/live.ts','direct':True,'new_channel':'Live Channel'}
+        feed=service.register(payload,tested_selection=select_feed(payload))['id']
         self.assertTrue(self.connection.execute("SELECT enabled FROM channels WHERE slug='live-channel'").fetchone()[0])
         _,rows=self.generate()
         gen=rows[0]['generation_id']
@@ -131,6 +133,18 @@ class IPTVTests(unittest.TestCase):
         self.assertTrue(builder.generation_is_current('fox',date(2026,7,27)))
         with self.assertRaisesRegex(ValueError,'locked'):
             builder.generate_day('fox',date(2026,7,27))
+
+    def test_new_channel_requires_test_before_any_database_or_folder_changes(self):
+        service=self.service()
+        payload={'url':'http://lan/live.ts','direct':True,'new_channel':'Untested Channel'}
+        with patch('retrotv.media_folders.ensure_library_scaffold') as scaffold:
+            with self.assertRaisesRegex(ValueError,'Test this feed successfully'):
+                service.register(payload)
+            with self.assertRaisesRegex(ValueError,'selected feed changed'):
+                service.register(payload,tested_selection=select_feed({**payload,'url':'http://other/live.ts'}))
+            scaffold.assert_not_called()
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM iptv_sources').fetchone()[0],0)
+        self.assertIsNone(self.connection.execute("SELECT id FROM channels WHERE slug='untested-channel'").fetchone())
 
     def test_disabling_invalidates_only_affected_channel(self):
         feed=self.add()

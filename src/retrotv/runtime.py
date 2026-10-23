@@ -13,6 +13,8 @@ from typing import Any
 
 from retrotv.processing import enabled
 from retrotv.db import connect_database
+from retrotv.channel_jobs import ChannelDeletionQueue
+from retrotv.channel_management import ChannelDeletionService, ChannelPreparationStopping
 from retrotv.duplicates import DuplicateService
 from retrotv.announcements import UpNextRenderer
 from retrotv.audio_normalization import AudioNormalizationService
@@ -82,6 +84,8 @@ class ApplicationRuntime:
         self.cache_cleanup_thread: threading.Thread | None = None
         self.normalization_review_thread: threading.Thread | None = None
         self.library_recovery_thread: threading.Thread | None = None
+        self.channel_deletion_thread: threading.Thread | None = None
+        self.channel_deletions = ChannelDeletionQueue(config)
         self.normalization_review = {"state": "idle", "error": None}
         self.playback_recovery = {"state": "idle", "missing": None, "error": None}
         self._missing_paths_seen: set[tuple[int, str]] = set()
@@ -335,6 +339,7 @@ class ApplicationRuntime:
             )
             self.internet_media_thread.start()
         self.weather_companion.start()
+        self._start_channel_deletions()
         self.request_guide_refresh()
         self._refresh_pending_actions()
         window_active = self._check_maintenance_window(initial=True)
@@ -507,6 +512,7 @@ class ApplicationRuntime:
             ("internet cache cleanup", self.cache_cleanup_thread),
             ("normalization review", self.normalization_review_thread),
             ("missing media scan", self.library_recovery_thread),
+            ("channel deletion", self.channel_deletion_thread),
             ("Guide rendering", self.guide_thread),
             ("announcement rendering", self.announcement_thread),
         )
@@ -627,6 +633,7 @@ class ApplicationRuntime:
                 "maintenance": dict(self.maintenance),
                 "normalization_review": dict(self.normalization_review),
                 "playback_recovery": dict(self.playback_recovery),
+                "channel_deletions": self.channel_deletions.snapshot(),
                 "readiness": dict(self.readiness),
                 "internet_media": dict(self.internet_media),
                 "normalization_batch": {
@@ -821,6 +828,7 @@ class ApplicationRuntime:
         if qualifying_activity:
             self._record_human_activity()
         with self.lock:
+            self._assert_channel_not_deleting(requested)
             if self.playback_thread and self.playback_thread.is_alive():
                 self.tune(requested)
                 return
@@ -866,6 +874,7 @@ class ApplicationRuntime:
         resolved = self._resolve_channel(channel)
         self._record_human_activity()
         with self.lock:
+            self._assert_channel_not_deleting(resolved)
             if self.requested_channel != resolved:
                 self.previous_channel = self.requested_channel
                 self.tuned_since = datetime.now(self.timezone)
@@ -875,7 +884,6 @@ class ApplicationRuntime:
                 self.start_tv(resolved)
                 return
             controller.request_tune(resolved)
-            self._show_channel_osd(resolved)
 
     def tune_number(self, channel_number: int) -> None:
         matches = [
@@ -1007,6 +1015,144 @@ class ApplicationRuntime:
                     self.start_tv(channel, qualifying_activity=False)
                 self._review_resume = False
 
+    def request_channel_deletion(self, slug, *, confirmation_text, acknowledge_rescan, expected_identity=None):
+        with self.lock:
+            if self.stop_event.is_set():
+                raise ValueError("CRTV Sim is shutting down")
+            with closing(connect_database(self.config.database_path)) as connection:
+                channel = ChannelDeletionService(connection, self.config)._channel(slug)
+                if expected_identity is not None and channel["management_identity"] != expected_identity:
+                    raise ValueError("The channel changed after the deletion preview; review it again")
+                preview = {"slug": channel["slug"], "display_name": channel["display_name"],
+                           "channel_identity": channel["management_identity"],
+                           "confirmation_text": f"DELETE {channel['display_name']}"}
+            job = self.channel_deletions.enqueue(preview, confirmation_text=confirmation_text,
+                                                acknowledge_rescan=acknowledge_rescan)
+            self._start_channel_deletions()
+            return {"queued": True, "job": job}
+
+    def cancel_channel_deletion(self, job_id):
+        with self.lock:
+            if self.stop_event.is_set():
+                raise ValueError("CRTV Sim is shutting down")
+            return self.channel_deletions.cancel(job_id)
+
+    def recreate_channel_folders(self, slug, identity):
+        from retrotv.channel_folder_review import ChannelFolderReview
+        if not self.exclusive_operation_lock.acquire(blocking=False):
+            raise ValueError("Wait for the current channel/database operation to finish")
+        try:
+            with self.lock:
+                if self.stop_event.is_set():
+                    raise ValueError("CRTV Sim is shutting down")
+                if any(job["slug"] == slug for job in self.channel_deletions.pending()):
+                    raise ValueError("Cancel the queued deletion before recreating this channel's folders")
+                with closing(connect_database(self.config.database_path)) as connection:
+                    return ChannelFolderReview(connection, self.config).recreate(slug, identity)
+        finally:
+            self.exclusive_operation_lock.release()
+
+    def _start_channel_deletions(self):
+        with self.lock:
+            if (self.stop_event.is_set() or not self.channel_deletions.pending()
+                    or (self.channel_deletion_thread and self.channel_deletion_thread.is_alive())):
+                return
+            self.channel_deletion_thread = threading.Thread(target=self._channel_deletion_worker,
+                name="crtv-channel-deletions", daemon=True)
+            self.channel_deletion_thread.start()
+
+    def _channel_deletion_worker(self):
+        try:
+            while not self.stop_event.is_set():
+                pending = self.channel_deletions.pending()
+                if not pending:
+                    return
+                for job in pending:
+                    if self.stop_event.is_set():
+                        return
+                    with self.lock:
+                        busy = self._exclusive_media_job_running() or any(
+                            thread and thread.is_alive() for thread in (self.guide_thread, self.announcement_thread))
+                        playing = self._channel_in_use(job["slug"])
+                    reason = ("Waiting for background maintenance or rendering to finish" if busy else
+                              "Tune to another channel or stop TV to finish deletion" if playing else None)
+                    if reason:
+                        if job["detail"] != reason:
+                            self.channel_deletions.update(job["id"], state="waiting", detail=reason)
+                        continue
+                    with self.exclusive_operation_lock:
+                        self.internet_pause_event.set()
+                        try:
+                            if not self.internet_writer_lock.acquire(timeout=0.2):
+                                reason = "Waiting for Internet Media preparation to finish"
+                                if job["detail"] != reason:
+                                    self.channel_deletions.update(job["id"], state="waiting", detail=reason)
+                                continue
+                            try:
+                                self._perform_channel_deletion(job)
+                            finally:
+                                self.internet_writer_lock.release()
+                        finally:
+                            self.internet_pause_event.clear()
+                if self.stop_event.wait(2):
+                    return
+        except Exception as exc:
+            # A queue persistence failure must be visible, never acknowledged as success.
+            with self.channel_deletions.lock:
+                self.channel_deletions.error = str(exc)
+        finally:
+            # Release the worker slot atomically with enqueue/start. Otherwise
+            # a request arriving during thread exit could remain queued forever.
+            with self.lock:
+                if self.channel_deletion_thread is threading.current_thread():
+                    self.channel_deletion_thread = None
+                if not self.channel_deletions.error:
+                    self._start_channel_deletions()
+
+    def _channel_in_use(self, slug):
+        active = self.controller is not None or bool(self.playback_thread and self.playback_thread.is_alive())
+        return active and (self.requested_channel == slug or getattr(self.controller, "channel_slug", None) == slug)
+
+    def _perform_channel_deletion(self, job):
+        from retrotv.db import utc_now
+        with self.lock:
+            if self.stop_event.is_set():
+                return
+            if not any(current["id"] == job["id"] for current in self.channel_deletions.pending()):
+                return
+            if self._channel_in_use(job["slug"]):
+                self.channel_deletions.update(job["id"], state="waiting", detail="Tune to another channel or stop TV to finish deletion")
+                return
+            self.channel_deletions.update(job["id"], state="running", detail="Deleting channel records", attempts=job["attempts"] + 1)
+        try:
+            with closing(connect_database(self.config.database_path)) as connection:
+                connection.execute("PRAGMA busy_timeout=250")
+                try:
+                    channel = connection.execute("SELECT management_identity FROM channels WHERE slug=?", (job["slug"],)).fetchone()
+                    if channel is None:
+                        result = {"deleted": job["slug"], "media_preserved": True, "already_absent": True}
+                    else:
+                        result = ChannelDeletionService(connection, self.config).delete(job["slug"],
+                            confirmation_text=job["confirmation_text"], acknowledge_rescan=True,
+                            expected_identity=job["channel_identity"], timeout_seconds=0)
+                finally:
+                    connection.rollback()
+            self.channel_deletions.update(job["id"], state="completed", detail="Channel deleted; finished media preserved",
+                                          completed_at=utc_now(), error=None, result=result)
+        except sqlite3.OperationalError as exc:
+            if (getattr(exc, "sqlite_errorcode", 0) & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or "locked" in str(exc).lower():
+                self.channel_deletions.update(job["id"], state="waiting", detail="Waiting for the database writer; deletion will retry automatically", error=None)
+            else:
+                self.channel_deletions.update(job["id"], state="failed", detail="Deletion failed; review and try again", error=str(exc), completed_at=utc_now())
+        except ChannelPreparationStopping as exc:
+            self.channel_deletions.update(job["id"], state="waiting", detail=str(exc), error=None)
+        except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+            self.channel_deletions.update(job["id"], state="failed", detail="Deletion failed; review and try again", error=str(exc), completed_at=utc_now())
+
+    def _assert_channel_not_deleting(self, slug):
+        if any(job["slug"] == slug and job["state"] == "running" for job in self.channel_deletions.pending()):
+            raise ValueError("This channel is being deleted; choose another channel")
+
     def request_maintenance(self) -> bool:
         if self.stop_event.is_set():
             return False
@@ -1086,6 +1232,7 @@ class ApplicationRuntime:
                 self.cache_cleanup_thread,
                 self.normalization_review_thread,
                 self.library_recovery_thread,
+                self.channel_deletion_thread,
             )
         )
 
@@ -1290,6 +1437,7 @@ class ApplicationRuntime:
                     )
                 ),
                 action_handler=self._handle_player_action,
+                tune_handler=self._show_channel_osd,
             )
             with self.lock:
                 self.controller = controller
@@ -2328,7 +2476,7 @@ class ApplicationRuntime:
                 self.maintenance["stage"] = "breakpoints"
             if self._maintenance_should_stop():
                 return
-            breakpoints = {"processed": 0, "natural": 0, "quiet_pause": 0, "midpoint": 0, "errors": 0}
+            breakpoints = {"processed": 0, "natural": 0, "still_card": 0, "quiet_pause": 0, "scene_fallback": 0, "midpoint": 0, "errors": 0}
             if bool(self.settings.get("analyze_breakpoints", True)):
                 analyzer = BreakpointAnalyzer(
                     connection, self.config, cancel_event=self.maintenance_cancel_event
@@ -2349,18 +2497,13 @@ class ApplicationRuntime:
                         result = analyzer.analyze_asset(int(row["id"]))
                         if result.status == "error":
                             breakpoints["errors"] += 1
-                        elif connection.execute(
-                            "SELECT 1 FROM asset_break_candidates WHERE asset_id=? AND selected=1 AND method='midpoint' LIMIT 1",
-                            (result.asset_id,),
-                        ).fetchone():
-                            breakpoints["midpoint"] += 1
-                        elif connection.execute(
-                            "SELECT 1 FROM asset_break_candidates WHERE asset_id=? AND selected=1 AND method='quiet_pause' LIMIT 1",
-                            (result.asset_id,),
-                        ).fetchone():
-                            breakpoints["quiet_pause"] += 1
                         else:
-                            breakpoints["natural"] += 1
+                            methods = {item[0] for item in connection.execute(
+                                "SELECT DISTINCT method FROM asset_break_candidates WHERE asset_id=? AND selected=1",
+                                (result.asset_id,))}
+                            category = next((method for method in ('midpoint','scene_fallback','quiet_pause','still_card')
+                                             if method in methods), 'natural')
+                            breakpoints[category] += 1
                     except ProcessCancelled:
                         break
                     except Exception:

@@ -441,7 +441,7 @@ def source_archive(output: Path, cache: Path, version: str, *, internal: bool) -
         for path in sorted((output / "licenses").rglob("*")):
             if path.is_file():
                 archive.write(path, path.relative_to(output).as_posix())
-        for path in (PROJECT/'scripts/microsoft_runtime.py', PROJECT/'packaging/microsoft-runtime.lock.json', PROJECT/'scripts/check-media-tools.py', PROJECT/'scripts/smoke-distribution.py'):
+        for path in (PROJECT/'scripts/microsoft_runtime.py', PROJECT/'packaging/microsoft-runtime.lock.json', PROJECT/'scripts/check-media-tools.py', PROJECT/'scripts/smoke-distribution.py', PROJECT/'scripts/release_reuse.py', PROJECT/'scripts/publish-release.py'):
             archive.write(path, 'release-recipes/'+path.name)
         archive.write(output/'MICROSOFT-RUNTIME.json', 'MICROSOFT-RUNTIME.json')
         readme = """CRTV Sim matching third-party sources and build materials

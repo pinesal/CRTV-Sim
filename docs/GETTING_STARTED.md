@@ -83,9 +83,10 @@ even if you open the Dashboard remotely. No Plex server or connector is required
 
 ## Use a live IPTV feed instead
 
-In **Library & Schedules → IPTV Live Feeds**, enter a direct HTTP/HTTPS HLS or
+In **Internet Media → IPTV Live Feeds**, enter a direct HTTP/HTTPS HLS or
 MPEG-TS stream URL, or inspect an M3U channel list and select a feed. Assign it to
-a scheduled channel/daypart or weekly special, save, then choose **Test feed**.
+a scheduled channel/daypart or weekly special. Choose **Test selected feed** first,
+then **Add feed** once the test passes. Testing creates no channel or folders.
 The separate test player opens on the PC running CRTV Sim.
 
 Live windows have no inserted commercials or other local programming. Shared
@@ -204,22 +205,63 @@ that frame and the program resumes with it. Browsing alone does not change the
 saved cut. **Reset to automatic** restores the automatic choice. Corrected
 entries remain visible under fallback filters until you refresh or change the
 filter. The existing typed timestamp controls remain available if previews fail.
-The normal number of break targets and spacing rules still apply; the scheduler
-may omit a pod when there is insufficient time or advertising to fill it.
+Break opportunities follow the program's normal rounded schedule package:
+30 minutes has one, 60 has three, 90 has five, and 120 has seven. Each half-hour
+portion has an interior opportunity and shares a boundary opportunity with the
+next portion. Preferred boundary targets allow approximately five minutes of
+advertising per portion; actual commercial lengths determine broadcast timing.
+Shortened daypart windows do not create a different permanent breakpoint layout.
+The scheduler may omit a pod when time or suitable advertising is insufficient.
+Minimum program-segment spacing always applies.
 
 Previews use the same working video as act-break analysis. They do not change
 managed or external source files. If that video changes during review, reopen
 the workshop before saving. Inactive workshop previews expire through temporary
 file cleanup; open workshops retain their previews while connected.
 
-If no strong natural cue is found, enabled fallbacks try a sustained quiet pause
-before the generic midpoint. These cuts are labeled **Quiet-pause fallback** and
-remain available for optional manual review. Use **All fallback breaks** to see
-both types. A quiet pause reduces the chance of cutting through dialogue but
-does not guarantee a scene has ended; background music can mask useful pauses.
-In Settings, **Quiet pause, then midpoint** enables both fallbacks and **No
-fallback breaks** disables both. Existing breaks remain usable while maintenance
-refreshes their analysis, and manual choices are preserved.
+Act-break selection follows this order: a strong natural cue (fade/black or a
+supported scene transition), a **Still-card cue**, a **Quiet-pause fallback**, a
+**Scene-transition fallback**, then the generic midpoint. Manual choices always
+win. Still-card detection looks for a near-still image held for 2–15 seconds,
+bounded by scene changes; music can continue throughout. Adjacent qualifying
+cards use the transition between them, while a continuous hold uses its midpoint.
+This is a visual heuristic, not recognition of the words on a title card:
+animated or noisy cards may be missed, and a similarly held photograph or
+freeze-frame can resemble a card. The configured search window is a preference for strong natural cues, which may
+be selected elsewhere in the safe program range. Held-card cues and fallback
+cuts stay inside their target's preferred window. Selection considers all targets
+together, preventing an early choice from unnecessarily blocking later breaks.
+
+Black detection also tolerates VHS recordings whose faded frames remain gray or
+contain tape noise. These candidates require brighter footage on both sides;
+very short tolerant intervals also need a measurable fade into darkness, rather
+than an abrupt tape flash. Music need not stop. The workshop identifies strict
+and VHS-tolerant black evidence, and explains selections outside the preferred
+window. Fades inside sketches can still resemble commercial boundaries; the
+workshop remains available for correction.
+
+Manual timestamps remain fixed when cadence is updated. They replace the nearest
+available automatic opportunities in order. If a legacy program already has more
+manual cuts than the new normal count, all are retained and no automatic cuts
+are added; the Dashboard explains this exception. Target-layout changes invalidate
+open workshop saves so a changed target number cannot receive the wrong cut.
+
+A quiet-only fallback now requires a complete pause of at least **1.5 seconds**
+below the existing loudness threshold. A scene-transition fallback requires no
+silence and is preferred over an arbitrary midpoint, but can still interrupt
+speech. Use the workshop for optional corrections; its evidence shows held-card
+boundaries, quiet duration and why a weaker cue was selected.
+
+Use **All fallback breaks** to see quiet-pause, scene-transition and midpoint
+cuts. **Still-card cues** has its own filter. In Settings, **Use fallback breaks**
+enables the quiet-pause → scene-transition → midpoint sequence; **No fallback
+breaks** disables those three, retaining natural and qualifying held-card cues.
+Existing cuts and their recorded target layout remain usable after a failed refresh
+and while bounded
+maintenance refreshes them, prioritizing upcoming programs. Manual overrides
+survive reanalysis; source files are never changed. Updated cuts flow into later
+eligible schedule rebuilds without interrupting playback or replacing locked
+and historical schedules.
 
 These are three different kinds of station material:
 
@@ -243,6 +285,22 @@ These are three different kinds of station material:
 The separate **Up Next** screen previews upcoming programming; an interstitial
 is a general station graphic used to cover a gap. Add station graphics through
 **Library & Schedules** if you prefer to upload or generate them in the Dashboard.
+
+In **Channel Graphics**, **Include station name and logo in AI artwork** is on
+by default. Uncheck it to request an unbranded background without automatically
+including the station name in the AI prompt. The image still goes to the
+selected channel, daypart, and holiday folder. Your art-direction text is sent
+as written, so leave station names out of that text too when you want a generic
+background. Generation progress and provider errors appear beside these controls.
+
+After copying artwork directly into a graphics folder, use **Refresh channel
+graphics** to index it. Real user or AI artwork takes priority over applicable
+holiday, daypart, and weekly-special placeholders. A real holiday or special
+graphic still takes priority over real year-round artwork. Placeholders are the
+last resort when no applicable real artwork exists; artwork from an inactive
+holiday or another special is not borrowed. Existing scheduled interstitials
+switch from a placeholder to newly indexed real artwork on their next render,
+without changing schedules or interrupting an already-playing screen.
 
 Up Next can use AI narration when the watched channel meets the generation rules.
 If AI is unavailable or generation fails, it uses a prerecorded generic announcement.
@@ -325,6 +383,31 @@ new ZIP. The detailed update instructions are in
 
 ## If something does not appear
 
+Library panel headings show their pending counts even when collapsed. Nonzero
+counts are highlighted; zero means that queue has no pending items. Review and
+analysis counts refresh after actions and once a minute while the page is visible,
+independently of table filters and the slower Programming Inventory refresh.
+Hover over a badge for its definition. A dashed badge retains the last known
+count if refreshing fails; an unavailable status is not a zero.
+
+The Media Library badge counts each file once across Library, long-commercial,
+aspect, and audio review. Duplicate Media Review counts pending **sets**, not
+copies. Act Breaks separates automatic analysis work from programs using
+fallback cuts, whose manual review is optional. The same item can appear in
+more than one panel, so do not add panel counts together. Graphics replacement
+counts are optional artwork tasks; missing optional Weather layers and
+never-generated announcer recordings are not reported as failures.
+
+In **Duplicate Media Review**, click an individual file path to open its video
+in a new tab, as in Holiday Filename Review. **Delete copy** lets you choose
+exactly which managed video to remove. The confirmation shows its full path,
+the copies being kept, and any shadows that reference it. Stop TV and wait for
+maintenance to finish before confirming. Deletion is permanent; it preserves
+other copies, backups, and schedule history. Shadows are not deleted; they may
+need review or reconnect to a matching copy during rescanning. External media
+remains read-only. Matching uses original content hashes, so normalized working
+copies may differ. Choose **Keep all intentionally** to retain all placements.
+
 In **Library & Schedules → Programming Inventory**, **Upcoming** shows program
 airings remaining in generated schedules for all channels, including holiday and
 weekly-special programming. Commercial breaks within an episode do not count as
@@ -351,6 +434,19 @@ and other shadow placements untouched. Aspect, audio, holiday, duplicate, and
 act-break reviews are separate and are not included in this inventory count.
 
 Reconnect the drive that contains your library, then use **Scan & update now**.
+If an individual channel folder has disappeared, **Channel folders and queued
+deletions** on Library and Internet Media offers **Recreate folders** or
+**Review deletion**. Recreate restores empty folders; it cannot recover videos.
+CRTV Sim keeps the channel's catalog until you decide. A disconnected library
+drive is reported as unavailable instead of suggesting that its channels be deleted.
+
+Confirmed channel deletions are queued, so a busy database no longer requires
+repeated clicks. The same panel shows whether a job is waiting, running,
+completed, or failed. Wait for background work to finish, and tune away if that
+channel is playing. You can cancel a waiting deletion; otherwise it resumes
+after a restart. Finished media stays on disk, and a remaining channel folder
+can register the channel again on a later scan.
+
 If a new channel or file is still missing, check that it is under the correct
 channel, daypart, and media-type folder. For example, an episode should be under
 `Your Channel/evening/episodes/Series Name/`. The Library page and Dashboard

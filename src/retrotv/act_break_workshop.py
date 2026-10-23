@@ -75,7 +75,8 @@ class ActBreakWorkshop:
             identity = hashlib.sha256(json.dumps([
                 str(path), stat.st_size, stat.st_mtime_ns,
             ]).encode()).hexdigest()
-            return {"path": path, "identity": identity, "duration_ms": round(row["duration_seconds"] * 1000)}
+            return {"path": path, "identity": identity, "duration_ms": round(row["duration_seconds"] * 1000),
+                    "layout_identity": BreakpointAnalyzer(connection, self.config).recorded_layout(asset_id)['identity']}
 
     def _session(self, asset_id, session_id):
         session = self.sessions.get(str(session_id))
@@ -118,7 +119,7 @@ class ActBreakWorkshop:
                     raise ValueError("Too many open workshops; close an existing workshop and retry")
                 session_id = secrets.token_hex(16)
                 session = {"asset_id": asset_id, "session_id": session_id,
-                           "identity": source["identity"], "generation": 0,
+                           "identity": source["identity"], "layout_identity": source["layout_identity"], "generation": 0,
                            "cancel": threading.Event(), "artifacts": {}, "touched": time.monotonic()}
                 self.sessions[session_id] = session
             if action == "open":
@@ -206,11 +207,22 @@ class ActBreakWorkshop:
                 with self.condition:
                     if source["identity"] != self._session(asset_id, session_id)["identity"]:
                         raise ValueError("Working video changed; reopen the workshop")
+            current_layout = BreakpointAnalyzer(connection, self.config).recorded_layout(asset_id)['identity']
+            expected_layout = payload.get('target_layout_identity')
+            with self.condition:
+                opened_layout = self._session(asset_id, session_id).get('layout_identity')
+            if (expected_layout is not None and expected_layout != current_layout
+                    or opened_layout is not None and opened_layout != current_layout):
+                raise ValueError('Act-break targets changed; reopen the workshop before saving')
             analyzer = BreakpointAnalyzer(connection, self.config,
                                            cancel_event=_Cancellation(self.closed, self.stop_event))
-            if payload["action"] == "manual":
-                return analyzer.set_manual(asset_id, int(payload["offset_ms"]), int(payload.get("target_index", 1)))
-            return analyzer.reset_manual(asset_id, int(payload["target_index"]))
+            if payload['action'] == 'manual':
+                result = analyzer.set_manual(asset_id, int(payload['offset_ms']), int(payload.get('target_index', 1)))
+            else:
+                result = analyzer.reset_manual(asset_id, int(payload['target_index']))
+            with self.condition:
+                self._session(asset_id, session_id)['layout_identity'] = analyzer.recorded_layout(asset_id)['identity']
+            return result
         finally:
             with self.condition:
                 self.active_saves -= 1

@@ -54,12 +54,13 @@ class GraphicsService:
 
         settings_service = SettingsService(self.config)
         settings_service._ensure_weekly_collection_directories(
-            {}, self.config.data.get("seasonal", {}).get("windows", {})
+            {}, self.config.data.get("seasonal", {}).get("windows", {}), existing_channels_only=True
         )
         settings_service.ensure_holiday_directories(
             self.config.data.get("seasonal", {}).get("windows", {}),
             self.config.data.get("seasonal", {}).get("holidays", {}),
             self.config.data.get("scheduling", {}).get("dayparts", []),
+            existing_channels_only=True,
         )
         created_folders = created_placeholders = 0
         channels = self.connection.execute(
@@ -72,6 +73,10 @@ class GraphicsService:
         }
         for row in channels:
             channel_root = folder_map.get(str(row["slug"]), self.media_root / str(row["slug"]))
+            if not channel_root.is_dir():
+                # Missing channel roots require a deliberate recreate/delete
+                # choice; catalog maintenance must not silently recreate them.
+                continue
             counts = self.ensure_structure(
                 channel_root,
                 str(row["display_name"]),
@@ -242,7 +247,9 @@ class GraphicsService:
         now = utc_now()
         seen: set[str] = set()
         seen_audio: set[str] = set()
-        count = 0
+        # Collect paths, stats and FFprobe results before acquiring SQLite's
+        # writer reservation. Network folders and probes can be slow.
+        updates = []
         rows = self.connection.execute(
             "SELECT id, slug FROM channels WHERE enabled = 1"
         ).fetchall()
@@ -276,7 +283,7 @@ class GraphicsService:
                         else "ai" if path.name.casefold().startswith("ai-")
                         else "user"
                     )
-                    self.connection.execute(
+                    updates.append((str(channel['slug']),
                         """
                         INSERT INTO graphic_assets(
                             channel_id,relative_path,purpose,holiday_slug,daypart_slug,
@@ -300,9 +307,8 @@ class GraphicsService:
                             weekly_collection, kind, duration, stat.st_size,
                             stat.st_mtime_ns, provenance, now, now,
                         ),
-                    )
+                    ))
                     seen.add(relative)
-                    count += 1
                 for path in sorted(root.rglob("*")):
                     if not path.is_file() or path.suffix.casefold() not in AUDIO_EXTENSIONS:
                         continue
@@ -321,7 +327,7 @@ class GraphicsService:
                     holiday = variant_holiday or holiday
                     relative = path.relative_to(self.media_root).as_posix()
                     stat = path.stat()
-                    self.connection.execute(
+                    updates.append((str(channel['slug']),
                         """
                         INSERT INTO graphic_audio_assets(
                             channel_id,relative_path,purpose,holiday_slug,daypart_slug,
@@ -343,30 +349,32 @@ class GraphicsService:
                             weekly_collection, self._video_duration(path), stat.st_size,
                             stat.st_mtime_ns, now, now,
                         ),
-                    )
+                    ))
                     seen_audio.add(relative)
-                    count += 1
-        if seen:
-            placeholders = ",".join("?" for _ in seen)
-            self.connection.execute(
-                f"UPDATE graphic_assets SET validation_status='missing', detail='File was not found during graphics scan' WHERE relative_path NOT IN ({placeholders})",
-                tuple(sorted(seen)),
-            )
-        else:
-            self.connection.execute(
-                "UPDATE graphic_assets SET validation_status='missing', detail='File was not found during graphics scan'"
-            )
-        if seen_audio:
-            placeholders = ",".join("?" for _ in seen_audio)
-            self.connection.execute(
-                f"UPDATE graphic_audio_assets SET validation_status='missing', detail='File was not found during graphics scan' WHERE relative_path NOT IN ({placeholders})",
-                tuple(sorted(seen_audio)),
-            )
-        else:
-            self.connection.execute(
-                "UPDATE graphic_audio_assets SET validation_status='missing', detail='File was not found during graphics scan'"
-            )
-        self.connection.commit()
+        return self._publish_catalog(updates, seen, seen_audio)
+
+    def _publish_catalog(self, updates, seen, seen_audio) -> int:
+        count = 0
+        with self.connection:
+            # Reserve the writer before rechecking channel identities, so a
+            # deletion cannot race publication. No filesystem work happens here.
+            self.connection.execute('UPDATE graphic_assets SET id=id WHERE 0')
+            live = {row['id']: row['slug'] for row in self.connection.execute(
+                'SELECT id,slug FROM channels WHERE enabled=1')}
+            for slug, sql, parameters in updates:
+                if live.get(parameters[0]) == slug:
+                    count += self.connection.execute(sql, parameters).rowcount
+            for table, paths in (('graphic_assets', seen), ('graphic_audio_assets', seen_audio)):
+                if paths:
+                    placeholders = ','.join('?' for _ in paths)
+                    self.connection.execute(
+                        f"UPDATE {table} SET validation_status='missing', detail='File was not found during graphics scan' WHERE relative_path NOT IN ({placeholders})",
+                        tuple(sorted(paths)),
+                    )
+                else:
+                    self.connection.execute(
+                        f"UPDATE {table} SET validation_status='missing', detail='File was not found during graphics scan'"
+                    )
         return count
 
     def inventory(self) -> list[dict]:
@@ -483,6 +491,7 @@ class GraphicsService:
         weekly_collection = (self.weekly_collection_at(channel_slug, when)
                              if weekly_collection_slug is _AUTO_WEEKLY
                              else slugify(weekly_collection_slug or ""))
+        placeholder_fallback = None
         if weekly_collection:
             active_holiday = self._active_holiday(when)
             rows = self.connection.execute(
@@ -502,6 +511,11 @@ class GraphicsService:
                 if (self.media_root / Path(row["relative_path"])).is_file()
             ]
             if rows:
+                # Authored standard weekly art also beats a holiday placeholder.
+                # If this collection has only placeholders, defer it until all
+                # applicable channel artwork has been checked.
+                authored = [row for row in rows if row["provenance"] != "placeholder"]
+                rows = authored or rows
                 if active_holiday and any(row["holiday_slug"] == active_holiday for row in rows):
                     rows = [row for row in rows if row["holiday_slug"] == active_holiday]
                 else:
@@ -515,7 +529,10 @@ class GraphicsService:
                     if {"user": 0, "ai": 1, "placeholder": 2}.get(str(row["provenance"]), 3)
                     == best_rank
                 ]
-                return (rng or random.SystemRandom()).choice(choices)
+                chosen = (rng or random.SystemRandom()).choice(choices)
+                if authored:
+                    return chosen
+                placeholder_fallback = chosen
         holiday = self._active_holiday(when)
         daypart = daypart_slug or self.daypart_slug_at(when)
         scopes: list[tuple[str | None, str | None]] = []
@@ -527,7 +544,6 @@ class GraphicsService:
         if daypart:
             scopes.append((daypart, None))
         scopes.append((None, None))
-        placeholder_fallback = None
         for desired_daypart, desired_holiday in scopes:
             rows = self.connection.execute(
                 """
@@ -667,6 +683,16 @@ class GraphicsService:
         ).fetchone()
         if row is None:
             raise ValueError(f"Graphic asset {graphic_asset_id} is unavailable")
+        if row["provenance"] == "placeholder":
+            # Existing schedules can still refer to a placeholder chosen before
+            # real art was added. Upgrade the presentation at render time without
+            # changing schedule rows, timing, or an already-playing screen.
+            replacement = self.select_asset(str(row["channel_slug"]), str(row["purpose"]),
+                when or datetime.now().astimezone())
+            if replacement is not None and replacement["provenance"] != "placeholder":
+                graphic_asset_id = int(replacement["id"])
+                row = self.connection.execute("""SELECT ga.*,c.slug AS channel_slug FROM graphic_assets ga
+                    JOIN channels c ON c.id=ga.channel_id WHERE ga.id=?""", (graphic_asset_id,)).fetchone()
         source = self.media_root / Path(row["relative_path"])
         if not source.is_file():
             raise FileNotFoundError(source)

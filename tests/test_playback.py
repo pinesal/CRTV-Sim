@@ -3,6 +3,7 @@ import json
 import unittest
 import uuid
 from datetime import date, datetime
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -235,6 +236,44 @@ class PlaybackTests(unittest.TestCase):
         with patch.object(player, "_command") as command:
             player.set_osd_font_size(72)
         command.assert_called_once_with(["set_property", "osd-font-size", 72])
+
+    def test_channel_osd_follows_successful_tuning_and_does_not_repeat_at_program_changes(self):
+        now=datetime(2026,7,27,0,30,tzinfo=ScheduleResolver(self.connection,self.config).scheduler.timezone)
+        target=ScheduleResolver(self.connection,self.config).resolve('fox',now)
+        resolver=SimpleNamespace(resolve=lambda channel,clock:replace(target,channel_slug=channel))
+        player=FakePlayer();shown=[]
+        controller=PlaybackController(resolver,player,clock=lambda:now,
+            tune_handler=lambda channel:shown.append((channel,len(player.loaded))))
+        controller.tune_once('fox')
+        self.assertEqual(shown,[('fox',1)])
+        target=replace(target,entry_id=target.entry_id+1)
+        controller.tune_once('fox')
+        self.assertEqual(shown,[('fox',1)])
+        controller.request_tune('pbs');controller.tune_once('pbs')
+        self.assertEqual(shown[-1],('pbs',3))
+        controller.request_retune();controller.tune_once('pbs')
+        self.assertEqual(shown[-1],('pbs',4))
+        with patch.object(player,'load',side_effect=RuntimeError('load failed')):
+            controller.request_tune('fox')
+            with self.assertRaises(RuntimeError):controller.tune_once('fox')
+        self.assertEqual(len(shown),3)
+
+    def test_local_and_live_osc_visibility_changes_never_overwrite_channel_osd(self):
+        from datetime import timedelta
+        player=MpvIpcPlayer(self.config)
+        now=datetime.now().astimezone()
+        from retrotv.playback import PlaybackTarget
+        target=PlaybackTarget(1,1,'Test','episode',now,now+timedelta(minutes=1),
+            self.temporary/'test.mp4','original',0,60)
+        def command(cmd,**kwargs):
+            if cmd[0]=='loadfile':player.file_loaded.set()
+            if cmd[:2]==['get_property','time-pos']:return 0
+        with patch.object(player,'start'),patch.object(player,'_remember_track_choices'),patch.object(player,'_restore_track_choices'),patch.object(player,'_command',side_effect=command) as ipc:
+            player.load(target)
+            player.load(replace(target,stream_url='http://lan/live.ts',feed_id=1))
+            player.load(target)
+        messages=[call.args[0] for call in ipc.call_args_list if call.args[0][:2]==['script-message','osc-visibility']]
+        self.assertEqual(messages,[['script-message','osc-visibility',mode,'no-osd'] for mode in ['auto','never','auto']])
 
     def test_resolver_joins_entry_at_wall_clock_offset(self):
         resolver = ScheduleResolver(self.connection, self.config)

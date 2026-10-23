@@ -32,6 +32,22 @@ def _mask_alpha(path: Path, width: int, x: int, y: int) -> int:
 
 
 class GraphicsLabTests(unittest.TestCase):
+    def test_unbranded_prompt_never_automatically_includes_station_identity(self):
+        for purpose in ('up-next','interstitials'):
+            for direction in ('', 'An abstract newsroom in blue and silver.'):
+                with self.subTest(purpose=purpose, direction=direction):
+                    prompt = build_prompt(method='composition-blueprint', template_set='composition-blueprint',
+                        channel_name='Cbs News', art_direction=direction, has_logo_reference=False,
+                        purpose=purpose, include_station_name=False)
+                    self.assertNotIn('cbs', prompt.lower())
+                    self.assertIn('unbranded background artwork', prompt)
+                    self.assertNotIn('Place the generated station logo', prompt)
+                    self.assertNotIn('station logo that reads exactly', prompt)
+                    if purpose == 'up-next':
+                        self.assertIn('central text-safe rectangle', prompt)
+                    if direction:
+                        self.assertIn(direction, prompt)
+
     def test_lab_creates_the_interstitial_blueprint_at_startup(self):
         root = Path.cwd() / ".test-tmp" / "graphics-lab-initialization"
         root.mkdir(parents=True, exist_ok=True)

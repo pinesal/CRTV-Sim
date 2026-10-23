@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from collections import Counter
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
@@ -106,6 +107,45 @@ def inspect_url(url: str, *, stop_event=None) -> dict:
     return {'url': url, 'kind': 'playlist', 'feeds': feeds, 'skipped_entries':skipped}
 
 
+def presentation_mode(value='preserve'):
+    if value not in {'preserve', 'fill_4_3', 'stretch_4_3'}:
+        raise ValueError('Choose Preserve original, Fill 4:3 or Stretch to 4:3')
+    return value
+
+
+def presentation_filter(mode):
+    mode = presentation_mode(mode)
+    if mode == 'fill_4_3':
+        # Work in display dimensions, including anamorphic pixel aspect ratios.
+        # libavfilter reconfigures this graph when the input format changes.
+        return "lavfi=[crop=w='min(iw,ih*4/3/sar)':h='min(ih,iw*sar*3/4)',setsar=1,setdar=4/3]"
+    if mode == 'stretch_4_3':
+        return 'lavfi=[setsar=1,setdar=4/3]'
+    return None
+
+
+def select_feed(payload):
+    """Resolve an unsaved selection without creating sources, channels or folders."""
+    mode = presentation_mode(payload.get('presentation','preserve'))
+    url = stream_url(payload.get('url', ''))
+    direct = bool(payload.get('direct'))
+    catalog = ({'kind':'direct', 'feeds':[{'key':'direct',
+                'name':urlsplit(url).hostname, 'url':url}]} if direct else inspect_url(url))
+    key = payload.get('selection_key') or 'direct'
+    matches = [f for f in catalog['feeds'] if f['key'] == key]
+    if len(matches) != 1:
+        raise ValueError('Select one unambiguous feed; refresh the playlist if it changed')
+    return {'url':url, 'direct':direct, 'selection_key':key, 'kind':catalog['kind'],
+            'feed':dict(matches[0]), 'presentation':mode}
+
+
+def selection_matches(selection, payload):
+    return (selection['url'] == stream_url(payload.get('url', ''))
+            and selection['direct'] == bool(payload.get('direct'))
+            and selection.get('presentation','preserve') == presentation_mode(payload.get('presentation','preserve'))
+            and selection['selection_key'] == (payload.get('selection_key') or 'direct'))
+
+
 class IPTVService:
     def __init__(self, connection, config):
         self.connection, self.config = connection, config
@@ -116,29 +156,27 @@ class IPTVService:
             raise ValueError('Unknown IPTV feed')
         return row
 
-    def register(self, payload):
-        url = stream_url(payload.get('url', ''))
-        # Explicit direct registration remains possible during an outage.
-        if payload.get('direct'):
-            catalog = {'kind': 'direct', 'feeds': [{'key': 'direct', 'name': urlsplit(url).hostname, 'url': url}]}
-        else:
-            catalog = inspect_url(url)
-        key = payload.get('selection_key', 'direct')
-        selected = [f for f in catalog['feeds'] if f['key'] == key]
-        if len(selected) != 1:
-            raise ValueError('Select one unambiguous feed; refresh the playlist if it changed')
-        item = selected[0]
+    def register(self, payload, *, tested_selection=None):
+        # This proof comes from the application's preview, never from request JSON.
+        if payload.get('new_channel') and tested_selection is None:
+            raise ValueError('Test this feed successfully before creating its channel')
+        if tested_selection is not None and not selection_matches(tested_selection, payload):
+            raise ValueError('The selected feed changed; test it again before saving')
+        selection = tested_selection or select_feed(payload)
+        url, key, item = selection['url'], selection['selection_key'], selection['feed']
         name = str(payload.get('name') or item['name']).strip()[:250]
+        mode = presentation_mode(payload.get('presentation','preserve'))
         try:
             self.connection.execute('''INSERT INTO iptv_sources(url,kind,last_refresh,catalog_json)
                 VALUES (?,?,?,?) ON CONFLICT(url) DO UPDATE SET kind=excluded.kind,
                 last_refresh=excluded.last_refresh,catalog_json=excluded.catalog_json,refresh_error=NULL''',
-                (url, catalog['kind'], utc_now(), json.dumps(catalog['feeds'])))
+                (url, selection['kind'], utc_now(), json.dumps([item])))
             source = self.connection.execute('SELECT id FROM iptv_sources WHERE url=?', (url,)).fetchone()[0]
-            self.connection.execute('''INSERT INTO iptv_feeds(source_id,selection_key,name,stream_url)
-                VALUES (?,?,?,?) ON CONFLICT(source_id,selection_key) DO UPDATE SET enabled=1,
-                name=excluded.name,stream_url=excluded.stream_url,availability='unknown',detail=NULL''',
-                (source, key, name, item['url']))
+            self.connection.execute('''INSERT INTO iptv_feeds(source_id,selection_key,name,stream_url,presentation)
+                VALUES (?,?,?,?,?) ON CONFLICT(source_id,selection_key) DO UPDATE SET enabled=1,
+                name=excluded.name,stream_url=excluded.stream_url,availability='unknown',detail=NULL,
+                presentation=COALESCE(?,iptv_feeds.presentation)''',
+                (source, key, name, item['url'],mode,mode if 'presentation' in payload else None))
             feed_id = self.connection.execute('SELECT id FROM iptv_feeds WHERE source_id=? AND selection_key=?', (source,key)).fetchone()[0]
             if payload.get('new_channel'):
                 payload = dict(payload)
@@ -198,16 +236,22 @@ class IPTVService:
             if scope not in scopes:
                 raise ValueError('Choose a configured daypart, daytime or all-day')
             values.add((channel,scope,weekly,str(item.get('display_name','')).strip()[:250]))
-        self.connection.execute('DELETE FROM iptv_assignments WHERE feed_id=?', (feed_id,))
-        self.connection.executemany('''INSERT INTO iptv_assignments
-            (feed_id,channel_slug,scope,weekly_slug,display_name) VALUES (?,?,?,?,?)''',
-            [(feed_id,*v) for v in sorted(values)])
+        existing = {tuple(r) for r in self.connection.execute('''SELECT channel_slug,scope,weekly_slug,display_name
+            FROM iptv_assignments WHERE feed_id=?''', (feed_id,))}
+        if values != existing:
+            self.connection.execute('DELETE FROM iptv_assignments WHERE feed_id=?', (feed_id,))
+            self.connection.executemany('''INSERT INTO iptv_assignments
+                (feed_id,channel_slug,scope,weekly_slug,display_name) VALUES (?,?,?,?,?)''',
+                [(feed_id,*v) for v in sorted(values)])
         for channel, *_ in values:
             self.connection.execute('UPDATE channels SET enabled=1 WHERE slug=?', (channel,))
 
     def update(self, feed_id, payload):
         self._feed(feed_id)
         try:
+            if 'presentation' in payload:
+                self.connection.execute('UPDATE iptv_feeds SET presentation=? WHERE id=?',
+                    (presentation_mode(payload['presentation']),feed_id))
             if 'assignments' in payload:
                 self._assign(feed_id, payload['assignments'])
             if 'enabled' in payload:
@@ -268,7 +312,7 @@ class IPTVService:
                                 (state,detail,utc_now(),feed_id))
         self.connection.commit()
 
-    def overview(self):
+    def overview(self, *, include_conflicts=True, cancel_event=None):
         from retrotv.scheduling import ScheduleBuilder
         from retrotv.synthetic import weather_channel_definition
         scheduler = ScheduleBuilder(self.connection,self.config)
@@ -282,13 +326,51 @@ class IPTVService:
             LEFT JOIN channel_playback_preferences p ON p.channel_id=c.id
             WHERE COALESCE(p.playback_mode,'scheduled')='scheduled' AND c.slug NOT IN ('guide',?) ORDER BY c.channel_number''',
             (weather_channel_definition(self.config).slug,))]
-        conflicts = [dict(r) for r in self.connection.execute('''SELECT c.slug,se.daypart_slug,se.starts_at,se.ends_at,se.explanation_json
-            FROM schedule_entries se JOIN schedule_generations g ON g.id=se.generation_id
-            JOIN channels c ON c.id=se.channel_id WHERE g.status='active' AND se.entry_type='iptv_conflict'
-            AND se.ends_at>? ORDER BY se.starts_at LIMIT 100''', (utc_now(),))]
-        return {'feeds':feeds,'channels':channels,'scopes':['all-day','daytime',*(p.slug for p in scheduler.dayparts)],
+        result = {'feeds':feeds,'channels':channels,'scopes':['all-day','daytime',*(p.slug for p in scheduler.dayparts)],
                 'weekly':[{'slug':w.slug,'channel':w.channel_slug,'name':w.guide_label} for w in scheduler.rules.windows],
-                'conflicts':conflicts}
+                'conflicts':[]}
+        if include_conflicts:
+            status = self.conflict_status(cancel_event=cancel_event)
+            result.update(conflicts=status['items'], conflicts_complete=status['complete'],
+                          conflicts_detail=status['detail'])
+        return result
+
+    def conflict_status(self, *, timeout_seconds=2.0, cancel_event=None):
+        """Bound diagnostics separately from the fast assignment catalog.
+
+        Begin with current/future generations using the existing indexes. A
+        scan of every historical schedule entry can take minutes on a large DB.
+        """
+        from retrotv.scheduling import resolve_timezone
+        settings = self.config.data.get('scheduling', {})
+        zone = resolve_timezone(str(settings.get('timezone', self.config.data.get('application', {}).get('timezone', 'UTC'))))
+        since = (datetime.now(zone).date() - timedelta(days=1)).isoformat()
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        def interrupted():
+            return time.monotonic() >= deadline or bool(cancel_event and cancel_event.is_set())
+        unavailable = {'items': [], 'complete': False,
+            'detail': 'Conflict checking could not finish in time. Channel and daypart options remain available; choose Refresh status to retry.'}
+        if interrupted():
+            return unavailable
+        self.connection.set_progress_handler(interrupted, 1000)
+        try:
+            rows = self.connection.execute('''
+                SELECT c.slug,se.daypart_slug,se.starts_at,se.ends_at,se.explanation_json
+                FROM channels c
+                CROSS JOIN schedule_generations g INDEXED BY idx_schedule_one_active
+                CROSS JOIN schedule_entries se INDEXED BY idx_schedule_entries_generation
+                WHERE g.channel_id=c.id AND g.status='active' AND g.schedule_date>=?
+                  AND se.generation_id=g.id AND se.entry_type='iptv_conflict'
+                  AND julianday(se.ends_at)>julianday(?)
+                ORDER BY se.starts_at LIMIT 100
+            ''', (since, utc_now())).fetchall()
+            return {'items': [dict(row) for row in rows], 'complete': True, 'detail': None}
+        except sqlite3.OperationalError as exc:
+            if getattr(exc, 'sqlite_errorcode', 0) == sqlite3.SQLITE_INTERRUPT:
+                return unavailable
+            raise
+        finally:
+            self.connection.set_progress_handler(None, 0)
 
     def fingerprint(self, channel):
         return [list(r) for r in self.connection.execute('''SELECT a.id,a.feed_id,a.scope,a.weekly_slug,a.display_name,

@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 import unittest
 import uuid
 from datetime import datetime
@@ -6,11 +7,173 @@ from pathlib import Path
 from unittest.mock import patch
 
 from retrotv.config import AppConfig
+from retrotv.channel_management import ChannelDeletionService
 from retrotv.db import apply_migrations, connect_database
 from retrotv.graphics import GraphicsService
 
 
 class GraphicsTests(unittest.TestCase):
+    @patch("retrotv.graphics.subprocess.run")
+    def test_authored_year_round_art_beats_all_holiday_and_weekly_placeholders(self, run):
+        run.return_value.returncode = 1
+        service = GraphicsService(self.connection, self.config)
+        service.ensure_all()
+        when = datetime.fromisoformat('2026-10-03T20:30:00-07:00')
+        root = self.media / 'nickelodeon'
+        for purpose in ('interstitials','up-next'):
+            ordinary = root/'specials/weekly/snick'/purpose/'placeholder.png'
+            seasonal = root/'specials/holidays/halloween/specials/weekly/snick'/purpose/'placeholder.png'
+            for path in (ordinary, seasonal):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'placeholder')
+            for name in ('ai-station.png', 'authored.png'):
+                with self.subTest(purpose=purpose,name=name):
+                    art = root/'graphics'/purpose/name
+                    art.write_bytes(b'real artwork')
+                    service.scan_catalog()
+                    self.assertEqual(service.select('nickelodeon',purpose,when),art)
+                    self.assertEqual(service.select('nickelodeon',purpose,when,weekly_collection_slug=None),art)
+                    art.unlink()
+            service.scan_catalog()
+            self.assertEqual(service.select('nickelodeon',purpose,when),seasonal)
+
+    @patch("retrotv.graphics.subprocess.run")
+    def test_authored_weekly_art_beats_holiday_weekly_placeholder_but_real_holiday_wins(self, run):
+        run.return_value.returncode = 1
+        service = GraphicsService(self.connection,self.config)
+        service.ensure_all()
+        root = self.media/'nickelodeon'
+        base = root/'graphics/interstitials/authored.png'
+        weekly = root/'specials/weekly/snick/interstitials/authored.png'
+        seasonal = root/'specials/holidays/halloween/specials/weekly/snick/interstitials'
+        for path in (base,weekly,seasonal/'placeholder.png'):
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(b'art')
+        service.scan_catalog()
+        when=datetime.fromisoformat('2026-10-03T20:30:00-07:00')
+        self.assertEqual(service.select('nickelodeon','interstitials',when),weekly)
+        holiday = seasonal/'ai-seasonal.png'
+        holiday.write_bytes(b'holiday art')
+        service.scan_catalog()
+        self.assertEqual(service.select('nickelodeon','interstitials',when),holiday)
+        holiday.unlink();weekly.unlink();base.unlink()
+        service.scan_catalog()
+        # Art from an inactive holiday/special must not be borrowed.
+        christmas = root/'graphics/holidays/christmas/interstitials/real.png'
+        christmas.write_bytes(b'Christmas')
+        service.scan_catalog()
+        self.assertEqual(service.select_asset('nickelodeon','interstitials',when)['provenance'],'placeholder')
+
+    @patch("retrotv.graphics.subprocess.run")
+    def test_old_placeholder_render_uses_new_real_art_instead_of_cached_placeholder(self, run):
+        run.return_value.returncode = 1
+        self.config.data['graphics']['output_dir'] = str(self.root/'rendered')
+        service=GraphicsService(self.connection,self.config)
+        service.ensure_all()
+        when=datetime.fromisoformat('2026-10-15T20:30:00-07:00')
+        placeholder=service.select_asset('nickelodeon','interstitials',when)
+        def render(args,**kwargs):
+            Path(args[-1]).write_bytes(b'encoded')
+            return type('Result',(),{'returncode':0,'stderr':''})()
+        with patch('retrotv.graphics.hidden_run',side_effect=render) as encoder:
+            cached=service.render_interstitial(placeholder['id'],when=when)
+            art=self.media/'nickelodeon/graphics/interstitials/real.png'
+            art.write_bytes(b'new real artwork')
+            service.scan_catalog()
+            actual=service.render_interstitial(placeholder['id'],when=when)
+            self.assertNotEqual(actual,cached)
+            self.assertIn(str(art),encoder.call_args.args[0])
+            self.assertEqual(service.render_interstitial(placeholder['id'],when=when),actual)
+            self.assertEqual(encoder.call_count,2)
+            self.assertEqual(art.read_bytes(),b'new real artwork')
+
+    def test_audio_and_video_probes_do_not_hold_the_database_writer(self):
+        graphics = self.media / 'nickelodeon' / 'graphics' / 'up-next'
+        graphics.mkdir(parents=True)
+        for filename in ('a.png', 'b.mp4', 'c.mp3'):
+            (graphics / filename).write_bytes(b'media')
+        other = connect_database(self.config.database_path)
+        other.execute('PRAGMA busy_timeout=100')
+        self.addCleanup(other.close)
+        def probe(_path):
+            self.assertFalse(self.connection.in_transaction)
+            other.execute('UPDATE channels SET display_name=display_name WHERE id=1')
+            other.commit()
+            return 10.0
+        with patch.object(GraphicsService, '_video_duration', side_effect=probe) as probes:
+            self.assertEqual(GraphicsService(self.connection, self.config).scan_catalog(), 3)
+        self.assertEqual(probes.call_count, 2)
+
+    def test_scan_does_not_recreate_a_channel_deleted_during_probe(self):
+        graphics = self.media / 'nickelodeon' / 'graphics' / 'up-next'
+        graphics.mkdir(parents=True)
+        source = graphics / 'test.mp4'
+        source.write_bytes(b'unchanged video')
+        other = connect_database(self.config.database_path)
+        self.addCleanup(other.close)
+        def probe(_path):
+            ChannelDeletionService(other, self.config).delete('nickelodeon',
+                confirmation_text='DELETE Nickelodeon', acknowledge_rescan=True)
+            # An integer channel ID can be reused after deletion. Its new slug
+            # must not inherit the deleted channel's pending graphics records.
+            other.execute("INSERT INTO channels(id,slug,display_name) VALUES(1,'replacement','Replacement')")
+            other.commit()
+            return 10.0
+        with patch.object(GraphicsService, '_video_duration', side_effect=probe):
+            self.assertEqual(GraphicsService(self.connection, self.config).scan_catalog(), 0)
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM graphic_assets').fetchone()[0], 0)
+        self.assertEqual(source.read_bytes(), b'unchanged video')
+
+    def test_probe_failure_never_starts_a_write_and_publication_failure_rolls_back(self):
+        graphics = self.media / 'nickelodeon' / 'graphics' / 'up-next'
+        graphics.mkdir(parents=True)
+        (graphics / 'a.png').write_bytes(b'image')
+        video = graphics / 'b.mp4'
+        video.write_bytes(b'video')
+        service = GraphicsService(self.connection, self.config)
+        with patch.object(service, '_video_duration', side_effect=RuntimeError('probe failed')):
+            with self.assertRaisesRegex(RuntimeError, 'probe failed'):
+                service.scan_catalog()
+        self.assertFalse(self.connection.in_transaction)
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM graphic_assets').fetchone()[0], 0)
+        self.connection.execute("""CREATE TRIGGER reject_video BEFORE INSERT ON graphic_assets
+            WHEN NEW.relative_path LIKE '%.mp4' BEGIN SELECT RAISE(ABORT,'publish failed'); END""")
+        self.connection.commit()
+        with patch.object(service, '_video_duration', return_value=10):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, 'publish failed'):
+                service.scan_catalog()
+        self.assertFalse(self.connection.in_transaction)
+        self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM graphic_assets').fetchone()[0], 0)
+        other = connect_database(self.config.database_path)
+        try:
+            other.execute('PRAGMA busy_timeout=100')
+            other.execute('UPDATE channels SET display_name=display_name WHERE id=1')
+            other.commit()
+        finally:
+            other.close()
+
+    def test_channel_deletion_can_finish_while_graphics_are_being_probed(self):
+        graphics = self.media / 'nickelodeon' / 'graphics' / 'up-next'
+        graphics.mkdir(parents=True)
+        (graphics / 'a.png').write_bytes(b'image')
+        (graphics / 'b.mp4').write_bytes(b'video')
+        self.connection.execute("INSERT INTO channels(id,slug,display_name,enabled) VALUES(2,'cbs-news','CBS NEWS',0)")
+        self.connection.commit()
+        other = connect_database(self.config.database_path)
+        other.execute('PRAGMA busy_timeout=100')
+        self.addCleanup(other.close)
+        def probe(_path):
+            # A slow FFprobe used to run after the image's INSERT had acquired
+            # the writer reservation, blocking this unrelated IPTV channel.
+            manager = ChannelDeletionService(other, self.config)
+            manager.preview('cbs-news')
+            result = manager.delete('cbs-news', confirmation_text='DELETE CBS NEWS', acknowledge_rescan=True)
+            self.assertEqual(result['deleted'], 'cbs-news')
+            return 10.0
+        with patch.object(GraphicsService, '_video_duration', side_effect=probe):
+            self.assertEqual(GraphicsService(self.connection, self.config).scan_catalog(), 2)
+        self.assertIsNone(other.execute("SELECT id FROM channels WHERE slug='cbs-news'").fetchone())
+
     @patch("retrotv.graphics.subprocess.run")
     def test_holiday_global_overrides_standard_daypart_and_canonical_wins_legacy(self, run):
         run.return_value.returncode = 1

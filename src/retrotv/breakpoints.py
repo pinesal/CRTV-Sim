@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 from threading import Event
 from dataclasses import dataclass
@@ -13,6 +15,8 @@ from zoneinfo import ZoneInfo
 from retrotv.asset_paths import resolve_asset_path, is_external
 from retrotv.db import utc_now
 from retrotv.process_control import ProcessCancelled, run_cancellable
+from retrotv.program_timing import normal_package_ms, break_targets
+from retrotv.break_selection import match_manual, select_breaks
 
 
 def resolve_breakpoint_media(connection, config, asset_id: int) -> Path:
@@ -47,9 +51,20 @@ class BreakpointResult:
 class BreakpointAnalyzer:
     """Find and record every intended act break across a program."""
 
-    ANALYSIS_VERSION = 6
-    FALLBACK_METHODS = frozenset({"midpoint", "quiet_pause"})
-    QUIET_PAUSE_MIN_MS = 500
+    ANALYSIS_VERSION = 8
+    CHUNK_MS = 480_000
+    CHUNK_OVERLAP_MS = 16_000
+    NOISY_BLACK_PIXEL_THRESHOLD = 0.15
+    NOISY_BLACK_PICTURE_THRESHOLD = 0.95
+    BLACK_MIN_SECONDS = 0.08
+    BLACK_CONTRAST = 12
+    FALLBACK_METHODS = frozenset({"midpoint", "quiet_pause", "scene_fallback"})
+    QUIET_PAUSE_MIN_MS = 1500
+    STILL_CARD_MIN_MS = 2000
+    STILL_CARD_MAX_MS = 15000
+    STILL_NOISE_TOLERANCE = 0.003
+    STILL_TRANSITION_TOLERANCE_MS = 500
+    STILL_PAIR_GAP_MS = 1000
     SILENCE_THRESHOLD_DB = -35
 
     def __init__(self, connection, config, *, cancel_event: Event | None = None):
@@ -66,9 +81,17 @@ class BreakpointAnalyzer:
         self.minimum_segment_ms = round(
             float(settings.get("midroll_min_segment_minutes", 5)) * 60_000
         )
-        self.clock_slot_ms = max(
-            60_000, round(float(settings.get("clock_slot_minutes", 30)) * 60_000)
-        )
+        self.clock_slot_ms = max(15, int(settings.get('clock_slot_minutes', 30))) * 60_000
+        short_target_ms = max(1, round(float(settings.get('short_program_target_minutes',
+            settings.get('short_episode_max_minutes', 20))) * 60_000))
+        self.short_slot_ms = max(short_target_ms, round(float(settings.get(
+            'short_program_slot_minutes', settings.get('pairing_slot_minutes',
+                                                       settings.get('clock_slot_minutes', 30)))) * 60_000))
+        self.policy_key = hashlib.sha256(json.dumps([
+            self.clock_slot_ms, self.short_slot_ms, self.minimum_duration_ms,
+            self.search_window_ms, self.minimum_segment_ms,
+            str(settings.get('midroll_fallback', 'midpoint')).casefold(),
+        ]).encode()).hexdigest()[:20]
 
     def pending_assets(self, *, limit: int | None = None) -> list:
         timezone_name = str(self.config.data.get("application", {}).get("timezone", "UTC"))
@@ -86,9 +109,9 @@ class BreakpointAnalyzer:
                  a.source_root_id IN (SELECT s.root_id FROM external_sources s JOIN storage_roots r ON r.id=s.root_id WHERE r.enabled=1 AND s.availability='available'))
             AND a.integrity_status IN ('ready', 'not_scanned')
             AND m.duration_seconds > ?
-            AND (b.asset_id IS NULL OR b.status IN ('pending', 'error') OR
+            AND (b.asset_id IS NULL OR b.status IN ('pending', 'error') OR b.refresh_error IS NOT NULL OR
                  b.source_signature != CAST(a.file_size AS TEXT) || ':' ||
-                 CAST(a.modified_ns AS TEXT) || ':breaks-v{self.ANALYSIS_VERSION}')
+                 CAST(a.modified_ns AS TEXT) || ':breaks-v{self.ANALYSIS_VERSION}:{self.policy_key}')
         """
         dates = self.connection.execute(
             """SELECT DISTINCT schedule_date FROM schedule_generations
@@ -172,10 +195,8 @@ class BreakpointAnalyzer:
         if row is None:
             return []
         base_signature = f"{row['file_size']}:{row['modified_ns']}"
-        signature = f"{base_signature}:breaks-v{self.ANALYSIS_VERSION}"
-        # Version 5 recorded the same targets and spacing rules. Its cuts stay
-        # usable while the bounded maintenance queue refreshes their evidence.
-        if row["source_signature"] not in {signature, f"{base_signature}:breaks-v5"}:
+        # Recorded layouts/cuts stay usable while their policy is refreshed.
+        if not re.fullmatch(re.escape(base_signature) + r':breaks-v[5678](?::[0-9a-f]+)?', row['source_signature']):
             return []
         selected = self.connection.execute(
             """
@@ -200,179 +221,174 @@ class BreakpointAnalyzer:
                 safe_offsets.append(offset)
         return safe_offsets
 
+    def normal_package_ms(self, duration_ms: int) -> int:
+        return normal_package_ms(duration_ms, self.clock_slot_ms, self.short_slot_ms)
+
     def target_offsets(self, duration_ms: int) -> list[int]:
-        """Place targets about twelve content minutes apart across the whole file."""
-        count = max(1, round(duration_ms / (12 * 60_000)) - 1)
-        targets = [duration_ms * index // (count + 1) for index in range(1, count + 1)]
-        if count == 3 and 40 * 60_000 <= duration_ms <= 50 * 60_000:
-            # An hour package's middle break is preferably near the first
-            # half-hour boundary after allowing for the opening ad pod.
-            targets[1] = min(duration_ms - 2 * self.minimum_segment_ms,
-                             self.clock_slot_ms - 5 * 60_000)
-            targets[2] = (targets[1] + duration_ms) // 2
-        return [
-            target for target in targets
-            if self.minimum_segment_ms <= target
-            <= duration_ms - self.minimum_segment_ms
-        ]
+        return [item['target_ms'] for item in break_targets(
+            duration_ms, self.normal_package_ms(duration_ms), self.minimum_segment_ms)]
+
+    def _manuals(self, asset_id):
+        return {int(row['target_index']): int(row['offset_ms']) for row in self.connection.execute(
+            'SELECT target_index,offset_ms FROM asset_break_overrides WHERE asset_id=?', (asset_id,))}
+
+    def _new_layout(self, duration_ms, overrides, *, remap=True):
+        targets = break_targets(duration_ms, self.normal_package_ms(duration_ms), self.minimum_segment_ms)
+        intended_count = len(targets)
+        overflow = len(overrides) > intended_count
+        if overflow:
+            overrides = {index: point for index, point in enumerate(sorted(overrides.values()), 1)}
+            targets = [{'index': index, 'target_ms': point, 'role': 'legacy_manual'}
+                       for index, point in overrides.items()]
+        elif remap:
+            overrides = match_manual(targets, overrides)
+        for item in targets:
+            item['manual'] = item['index'] in overrides
+            if item['manual']:
+                item['manual_offset_ms'] = overrides[item['index']]
+        layout = {'version': self.ANALYSIS_VERSION, 'policy_key': self.policy_key,
+                  'normal_package_ms': self.normal_package_ms(duration_ms),
+                  'intended_count': intended_count, 'manual_overflow': overflow, 'targets': targets}
+        layout['identity'] = hashlib.sha256(json.dumps(layout, sort_keys=True).encode()).hexdigest()
+        return layout, overrides
+
+    def recorded_layout(self, asset_id):
+        row = self._asset(asset_id)
+        record = self.connection.execute('SELECT * FROM asset_break_analyses WHERE asset_id=?', (asset_id,)).fetchone()
+        if record is not None and record['target_layout_json']:
+            return json.loads(record['target_layout_json'])
+        duration_ms = round(row['duration_seconds'] * 1000)
+        overrides = self._manuals(asset_id)
+        if record is None or f':breaks-v{self.ANALYSIS_VERSION}:' in record['source_signature']:
+            return self._new_layout(duration_ms, overrides)[0]
+        # Reconstruct old target numbering without changing records on a GET.
+        count = max(1, round(duration_ms / 720_000) - 1)
+        points = [duration_ms * index // (count + 1) for index in range(1, count + 1)]
+        if count == 3 and 2_400_000 <= duration_ms <= 3_000_000:
+            points[1] = min(duration_ms - 2 * self.minimum_segment_ms, self.clock_slot_ms - 300_000)
+            points[2] = (points[1] + duration_ms) // 2
+        evidence = self.connection.execute('SELECT signals_json FROM asset_break_candidates WHERE asset_id=?', (asset_id,)).fetchall()
+        for entry in evidence:
+            signals = json.loads(entry[0])
+            index = signals.get('window', 0)
+            if 1 <= index <= len(points) and 'target_ms' in signals:
+                points[index - 1] = signals['target_ms']
+        targets = [{'index': index, 'target_ms': point, 'role': 'legacy', 'manual': index in overrides}
+                   for index, point in enumerate(points, 1)]
+        layout = {'version': 7, 'policy_key': None, 'normal_package_ms': self.normal_package_ms(duration_ms),
+                  'intended_count': len(targets), 'manual_overflow': False, 'targets': targets}
+        layout['identity'] = hashlib.sha256(json.dumps([layout, overrides], sort_keys=True).encode()).hexdigest()
+        return layout
 
     def set_manual(self, asset_id: int, offset_ms: int, target_index: int = 1) -> BreakpointResult:
         row = self._asset(asset_id)
-        duration_ms = round(float(row["duration_seconds"]) * 1000)
-        self._validate_offset(offset_ms, duration_ms)
-        targets = self.target_offsets(duration_ms)
-        if not 1 <= target_index <= len(targets):
-            raise ValueError("Unknown act-break target")
-        for existing in self.connection.execute(
-            "SELECT target_index,offset_ms FROM asset_break_overrides WHERE asset_id=? AND target_index!=?",
-            (asset_id, target_index),
-        ):
-            if (existing["target_index"] < target_index and
-                    offset_ms - existing["offset_ms"] < self.minimum_segment_ms) or (
-                    existing["target_index"] > target_index and
-                    existing["offset_ms"] - offset_ms < self.minimum_segment_ms):
-                raise ValueError("Manual breaks must remain ordered and at least five minutes apart")
-        self.connection.execute(
-            """INSERT INTO asset_break_overrides(asset_id,target_index,offset_ms,updated_at)
-               VALUES (?,?,?,?) ON CONFLICT(asset_id,target_index) DO UPDATE SET
-               offset_ms=excluded.offset_ms,updated_at=excluded.updated_at""",
-            (asset_id, target_index, offset_ms, utc_now()),
-        )
-        self.connection.commit()
-        return self.analyze_asset(asset_id)
+        self._validate_offset(offset_ms, round(row['duration_seconds'] * 1000))
+        if target_index not in {item['index'] for item in self.recorded_layout(asset_id)['targets']}:
+            raise ValueError('Unknown act-break target')
+        overrides = self._manuals(asset_id)
+        overrides[target_index] = offset_ms
+        self._validate_manuals(overrides, round(row['duration_seconds'] * 1000))
+        result = self.analyze_asset(asset_id, _override_edits=overrides)
+        if result.status == 'error':
+            raise ValueError('Act-break refresh failed; manual change was not saved')
+        return result
 
     def reset_manual(self, asset_id: int, target_index: int) -> BreakpointResult:
-        self.connection.execute(
-            "DELETE FROM asset_break_overrides WHERE asset_id=? AND target_index=?",
-            (asset_id, target_index),
-        )
-        self.connection.commit()
-        return self.analyze_asset(asset_id)
+        overrides = self._manuals(asset_id)
+        overrides.pop(target_index, None)
+        result = self.analyze_asset(asset_id, _override_edits=overrides)
+        if result.status == 'error':
+            raise ValueError('Act-break refresh failed; reset was not saved')
+        return result
 
-    def analyze_asset(self, asset_id: int) -> BreakpointResult:
+    def _validate_manuals(self, overrides, duration_ms):
+        previous = None
+        for index, point in sorted(overrides.items()):
+            self._validate_offset(point, duration_ms)
+            if previous is not None and point - previous < self.minimum_segment_ms:
+                raise ValueError('Manual breaks must remain ordered and respect the minimum segment length')
+            previous = point
+
+    def _collect_candidates(self, source, duration_ms, chapters):
+        candidates = []
+        # Context halos preserve complete holds/fades crossing core boundaries.
+        for core in range(self.minimum_segment_ms, duration_ms - self.minimum_segment_ms, self.CHUNK_MS):
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                raise ProcessCancelled('Act-break analysis cancelled')
+            start = max(0, core - self.CHUNK_OVERLAP_MS)
+            end = min(duration_ms, core + self.CHUNK_MS + self.CHUNK_OVERLAP_MS)
+            log = self._run_detection(source, start, end)
+            raw = self._parse_candidates(log, start, core, duration_ms)
+            self._apply_chapter_hints(raw, chapters, start, end)
+            for item in raw:
+                if item['method'] == 'scene' and not (item['signals'].get('silence') or item['signals'].get('chapter_supported')):
+                    item['method'] = 'scene_fallback'
+                    item['score'] = .30
+                    item['signals'].update(fallback=True, reason='scene transition without silence or chapter support')
+            raw.extend(self._still_candidates(log, start, end, duration_ms))
+            raw.extend(self._quiet_candidates(log, start, end, duration_ms))
+            candidates.extend(raw)
+        merged = {}
+        for item in sorted(candidates, key=lambda c: (c['offset_ms'], c['method'])):
+            signals = item['signals']
+            # Overlap halos see identical source frames; merge by interval identity.
+            key = (item['method'], signals.get('black_start_ms', item['offset_ms']),
+                   signals.get('black_end_ms', item['offset_ms']))
+            if key not in merged or item['score'] > merged[key]['score']:
+                merged[key] = item
+        return list(merged.values())
+
+    def analyze_asset(self, asset_id: int, *, _override_edits=None) -> BreakpointResult:
         row = self._asset(asset_id)
-        duration_ms = round(float(row["duration_seconds"]) * 1000)
-        if row["media_type"] not in {"episode", "movie"} or duration_ms <= self.minimum_duration_ms:
-            raise ValueError(f"Asset {asset_id} is not an eligible program over the threshold")
-        signature = self._signature(row)
-        targets = self.target_offsets(duration_ms)
-        if not targets:
-            raise ValueError(f"Asset {asset_id} has no safe act-break window")
-        source = self._playback_path(row)
-        chapters = self._chapter_starts(row, source)
-        candidates: list[dict] = []
-        selected_breaks: list[dict] = []
-        errors: list[str] = []
-        overrides = {int(item["target_index"]): int(item["offset_ms"])
-                     for item in self.connection.execute(
-                         "SELECT target_index,offset_ms FROM asset_break_overrides WHERE asset_id=?",
-                         (asset_id,),
-                     )}
-        allow_fallback = str(self.config.data.get("scheduling", {}).get(
-            "midroll_fallback", "midpoint")).casefold() == "midpoint"
-
-        def fits_spacing(offset_ms: int, index: int) -> bool:
-            if selected_breaks and offset_ms - selected_breaks[-1]["offset_ms"] < self.minimum_segment_ms:
-                return False
-            return all(
-                offset_ms - offset >= self.minimum_segment_ms if other < index
-                else offset - offset_ms >= self.minimum_segment_ms
-                for other, offset in overrides.items() if other != index
-            )
-
-        for index, target_ms in enumerate(targets, start=1):
-            start_ms = max(
-                self.minimum_segment_ms, target_ms - self.search_window_ms
-            )
-            end_ms = min(
-                duration_ms - self.minimum_segment_ms,
-                target_ms + self.search_window_ms,
-            )
-            if index in overrides:
-                self._validate_offset(overrides[index], duration_ms)
-                selected = {"offset_ms": overrides[index], "method": "manual",
-                            "score": 1.0, "signals": {"manual": True}}
-                window_candidates = [selected]
+        duration_ms = round(float(row['duration_seconds']) * 1000)
+        if row['media_type'] not in {'episode', 'movie'} or duration_ms <= self.minimum_duration_ms:
+            raise ValueError(f'Asset {asset_id} is not an eligible program over the threshold')
+        prior = self.connection.execute('SELECT * FROM asset_break_analyses WHERE asset_id=?', (asset_id,)).fetchone()
+        saved_manuals = self._manuals(asset_id)
+        overrides = saved_manuals if _override_edits is None else _override_edits
+        self._validate_manuals(overrides, duration_ms)
+        prior_layout = json.loads(prior['target_layout_json']) if prior is not None and prior['target_layout_json'] else None
+        remap = (prior_layout is None or prior_layout['policy_key'] != self.policy_key
+                 or prior_layout['manual_overflow'] or prior_layout['normal_package_ms'] != self.normal_package_ms(duration_ms))
+        if prior is None and _override_edits is not None:
+            # A first workshop edit already addresses the new layout.
+            remap = False
+        layout, overrides = self._new_layout(duration_ms, overrides, remap=remap)
+        if not layout['targets']:
+            raise ValueError(f'Asset {asset_id} has no safe act-break window')
+        try:
+            if len(overrides) == len(layout['targets']):
+                candidates = []
             else:
-                try:
-                    stderr = self._run_detection(source, start_ms, end_ms)
-                    window_candidates = self._parse_candidates(
-                        stderr, start_ms, target_ms, duration_ms
-                    )
-                    self._apply_chapter_hints(window_candidates, chapters, start_ms, end_ms)
-                    window_candidates = [item for item in window_candidates
-                                         if (item["method"] == "fade" or
-                                             item["signals"].get("silence") or
-                                             item["signals"].get("chapter_supported"))
-                                         and fits_spacing(item["offset_ms"], index)]
-                    if window_candidates:
-                        selected = max(window_candidates, key=lambda item: (
-                            item["score"] + self._boundary_bonus(item["offset_ms"], duration_ms),
-                            -abs(item["offset_ms"] - target_ms),
-                        ))
-                    elif allow_fallback:
-                        window_candidates = [item for item in self._quiet_candidates(
-                            stderr, start_ms, end_ms, duration_ms
-                        ) if fits_spacing(item["offset_ms"], index)]
-                        selected = min(window_candidates, key=lambda item: (
-                            abs(item["offset_ms"] - target_ms),
-                            -item["signals"]["silence_duration_ms"], item["offset_ms"],
-                        )) if window_candidates else None
-                    else:
-                        selected = None
-                    if selected is None and allow_fallback and fits_spacing(target_ms, index):
-                        selected = {
-                            "offset_ms": target_ms,
-                            "method": "midpoint",
-                            "score": 0.25,
-                            "signals": {"fallback": True, "reason": "no natural cue or sustained quiet pause"},
-                        }
-                        window_candidates = [selected]
-                except ProcessCancelled:
-                    raise
-                except Exception as exc:
-                    errors.append(f"window {index}: {exc}")
-                    selected = None
-                    window_candidates = []
-            for candidate in window_candidates:
-                candidate["signals"] = {
-                    **candidate["signals"], "window": index, "target_ms": target_ms
-                }
-            candidates.extend(window_candidates)
-            if selected is not None:
-                if selected_breaks and selected["offset_ms"] - selected_breaks[-1]["offset_ms"] < self.minimum_segment_ms:
-                    if selected["method"] == "manual" and selected_breaks[-1]["method"] != "manual":
-                        selected_breaks.pop()
-                    else:
-                        continue
-                selected_breaks.append(selected)
-
-        confidence = min((float(item["score"]) for item in selected_breaks), default=0.0)
-        methods = [str(item["method"]) for item in selected_breaks]
-        method = (
-            "midpoint"
-            if methods and all(value == "midpoint" for value in methods)
-            else methods[0] if len(methods) == 1 else "multiple" if methods else "none"
-        )
-        self._store(
-            asset_id, signature, candidates, selected_breaks, confidence,
-            "; ".join(errors) or None, status="error" if errors else
-            "manual" if overrides else "analyzed",
-        )
-        return BreakpointResult(
-            asset_id, "error" if errors else "manual" if overrides else "analyzed",
-            int(selected_breaks[0]["offset_ms"]) if selected_breaks else 0, method,
-            confidence, len(candidates)
-        )
-
-    def _boundary_bonus(self, offset_ms: int, duration_ms: int) -> float:
-        # Clock boundaries are a preference, never a reason to invent a cut.
-        slots = max(1, round(duration_ms / self.clock_slot_ms))
-        if slots < 2:
-            return 0.0
-        boundaries = (duration_ms * index / slots for index in range(1, slots))
-        distance = min(abs(offset_ms - boundary) for boundary in boundaries)
-        return 0.06 * max(0.0, 1.0 - distance / self.search_window_ms)
+                source = self._playback_path(row)
+                candidates = self._collect_candidates(source, duration_ms, self._chapter_starts(row, source))
+            selected, candidates = select_breaks(layout['targets'], candidates, overrides,
+                self.minimum_segment_ms, self.search_window_ms,
+                str(self.config.data.get('scheduling', {}).get('midroll_fallback', 'midpoint')).casefold() == 'midpoint', duration_ms)
+        except ProcessCancelled:
+            raise
+        except Exception as exc:
+            detail = str(exc)
+            if prior is not None and self.selected_offsets(asset_id):
+                self.connection.execute('UPDATE asset_break_analyses SET refresh_error=? WHERE asset_id=?', (detail, asset_id))
+            else:
+                self.connection.execute("""INSERT INTO asset_break_analyses(asset_id,source_signature,status,detail,refresh_error)
+                    VALUES (?,?,'error',?,?) ON CONFLICT(asset_id) DO UPDATE SET status='error',detail=excluded.detail,
+                    refresh_error=excluded.refresh_error""", (asset_id, self._signature(row), detail, detail))
+            self.connection.commit()
+            return BreakpointResult(asset_id, 'error', 0, 'none', 0.0, 0)
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise ProcessCancelled('Act-break analysis cancelled before publication')
+        self._store(asset_id, self._signature(row), candidates, selected,
+                    min((item['score'] for item in selected), default=0.0), None,
+                    status='manual' if overrides else 'analyzed', layout=layout, overrides=overrides,
+                    expected_layout=prior['target_layout_json'] if prior is not None else None,
+                    expected_manuals=saved_manuals)
+        methods = [item['method'] for item in selected]
+        method = methods[0] if methods and len(set(methods)) == 1 else 'multiple' if methods else 'none'
+        return BreakpointResult(asset_id, 'manual' if overrides else 'analyzed',
+            selected[0]['offset_ms'] if selected else 0, method,
+            min((item['score'] for item in selected), default=0.0), len(candidates))
 
     def _asset(self, asset_id: int):
         row = self.connection.execute(
@@ -388,11 +404,10 @@ class BreakpointAnalyzer:
             raise ValueError(f"Asset {asset_id} has no usable duration metadata")
         return row
 
-    @staticmethod
-    def _signature(row) -> str:
+    def _signature(self, row) -> str:
         return (
             f"{row['file_size']}:{row['modified_ns']}:"
-            f"breaks-v{BreakpointAnalyzer.ANALYSIS_VERSION}"
+            f"breaks-v{self.ANALYSIS_VERSION}:{self.policy_key}"
         )
 
     def _playback_path(self, row) -> Path:
@@ -403,7 +418,13 @@ class BreakpointAnalyzer:
         args = [
             self.config.ffmpeg, "-hide_banner", "-nostdin", "-ss", f"{start_ms / 1000:.3f}",
             "-t", f"{duration:.3f}", "-i", os.fspath(source),
-            "-vf", "scale=160:-2,blackdetect=d=0.08:pic_th=0.98,select='gt(scene,0.28)',showinfo",
+            "-vf", (f"scale=160:-2,freezedetect=n={self.STILL_NOISE_TOLERANCE}:d={self.STILL_CARD_MIN_MS/1000:g},"
+                    "blackdetect@strict=d=0.08:pic_th=0.98,"
+                    "metadata=print:key=lavfi.black_start:file=-,metadata=print:key=lavfi.black_end:file=-,"
+                    "metadata=delete:key=lavfi.black_start,metadata=delete:key=lavfi.black_end,"
+                    f"blackdetect@noisy=d={self.BLACK_MIN_SECONDS}:pix_th={self.NOISY_BLACK_PIXEL_THRESHOLD}:pic_th={self.NOISY_BLACK_PICTURE_THRESHOLD},"
+                    "metadata=print:key=lavfi.black_start,metadata=print:key=lavfi.black_end,"
+                    "signalstats,metadata@luma=print:key=lavfi.signalstats.YAVG,select='gt(scene,0.28)',metadata=print:key=lavfi.scene_score,showinfo"),
             "-af", f"silencedetect=n={self.SILENCE_THRESHOLD_DB}dB:d=0.15", "-f", "null", "-",
         ]
         if self.cancel_event is not None:
@@ -412,11 +433,24 @@ class BreakpointAnalyzer:
             result = subprocess.run(
                 args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False, timeout=max(60.0, duration * 4), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         if result.returncode:
             raise RuntimeError(result.stderr[-1000:] or "FFmpeg breakpoint analysis failed")
-        return result.stderr
+        # Older FFmpeg versions omit filter instance names in human log lines.
+        # Machine metadata on separate streams identifies the passes reliably.
+        log = '\n'.join(line for line in result.stderr.splitlines() if not re.search(r'black_start:[0-9.-]+', line))
+        for name, stream in [('strict', result.stdout), ('noisy', result.stderr)]:
+            left = None
+            for event in re.finditer(r'lavfi.black_(start|end)=(-?[0-9.]+)', stream):
+                point = float(event[2])
+                if event[1] == 'start':
+                    left = point
+                elif left is not None:
+                    if point - left >= self.BLACK_MIN_SECONDS and left >= 0:
+                        log += f'\n[blackdetect@{name}] black_start:{left} black_end:{point} black_duration:{point-left}'
+                    left = None
+        return log
 
     def _chapter_starts(self, row, playback_path: Path) -> list[int]:
         # Probe the working source first: a proxy may have discarded chapters.
@@ -425,11 +459,14 @@ class BreakpointAnalyzer:
             if not path.is_file():
                 continue
             try:
-                result = subprocess.run(
-                    [self.config.ffprobe, "-v", "error", "-show_chapters", "-of", "json", os.fspath(path)],
-                    capture_output=True, text=True, timeout=30, check=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
+                args = [self.config.ffprobe, "-v", "error", "-show_chapters", "-of", "json", os.fspath(path)]
+                if self.cancel_event is not None:
+                    result = run_cancellable(args, 30, self.cancel_event)
+                    if result.returncode:
+                        continue
+                else:
+                    result = subprocess.run(args, capture_output=True, text=True, timeout=30, check=True,
+                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 chapters = json.loads(result.stdout).get("chapters", [])
                 starts = sorted({round(float(item["start_time"]) * 1000)
                                  for item in chapters if float(item.get("start_time", 0)) > 0})
@@ -498,6 +535,71 @@ class BreakpointAnalyzer:
             })
         return candidates
 
+    @staticmethod
+    def _scene_events(stderr: str) -> list[tuple[float, float]]:
+        """Pair scene scores with their frame timestamps, retaining legacy logs."""
+        events = {}
+        current = None
+        for line in stderr.splitlines():
+            timestamp = re.search(r'pts_time:\s*(-?[0-9.]+)',line)
+            if timestamp:
+                current = float(timestamp[1])
+                if 'showinfo' in line:
+                    events.setdefault(current,0.0)
+            score = re.search(r'lavfi\.scene_score[=:]\s*([0-9.eE+-]+)',line)
+            if score and current is not None:
+                events[current] = float(score[1])
+        return sorted(events.items())
+
+    def _still_candidates(self, stderr, start_ms, end_ms, duration_ms):
+        window_ms = end_ms-start_ms
+        transitions = [(round(point*1000),score) for point,score in self._scene_events(stderr)]
+        holds, left = [], None
+        for match in re.finditer(r'freeze_(start|end):\s*(-?[0-9.]+)',stderr):
+            point = round(float(match[2])*1000)
+            if match[1] == 'start':
+                left = point
+                continue
+            if left is None:
+                continue
+            right, begin = point, left
+            left = None
+            if (begin <= 20 or right >= window_ms-20
+                    or not self.STILL_CARD_MIN_MS <= right-begin <= self.STILL_CARD_MAX_MS):
+                continue
+            entry = [p for p,_ in transitions if abs(p-begin)<=self.STILL_TRANSITION_TOLERANCE_MS]
+            exit_ = [p for p,_ in transitions if abs(p-right)<=self.STILL_TRANSITION_TOLERANCE_MS]
+            if not entry or not exit_:
+                continue
+            holds.append({'start_ms':start_ms+begin,'end_ms':start_ms+right,
+                'duration_ms':right-begin,
+                'entry_transition_ms':start_ms+min(entry,key=lambda p:(abs(p-begin),p)),
+                'exit_transition_ms':start_ms+min(exit_,key=lambda p:(abs(p-right),p))})
+        candidates, paired = [], set()
+
+        def candidate(offset, evidence, pair):
+            if self.minimum_segment_ms <= offset <= duration_ms-self.minimum_segment_ms:
+                candidates.append({'offset_ms':offset,'method':'still_card','score':0.65,
+                    'signals':{'still_card':True,'holds':evidence,'paired_cards':pair,
+                        'still_noise_tolerance':self.STILL_NOISE_TOLERANCE,
+                        'reason':'transition between adjacent held cards' if pair else
+                                 'near-still card bounded by scene transitions; midpoint within hold'}})
+
+        holds.sort(key=lambda h:(h['start_ms'],h['end_ms']))
+        for index,(first,second) in enumerate(zip(holds,holds[1:])):
+            if not 0 <= second['start_ms']-first['end_ms'] <= self.STILL_PAIR_GAP_MS:
+                continue
+            center = (first['end_ms']+second['start_ms'])//2
+            boundaries = [first['exit_transition_ms'],second['entry_transition_ms']]
+            offset = min(boundaries,key=lambda p:(abs(p-center),p))
+            if self.minimum_segment_ms <= offset <= duration_ms-self.minimum_segment_ms:
+                candidate(offset,[first,second],True)
+                paired.update((index,index+1))
+        for index,hold in enumerate(holds):
+            if index not in paired:
+                candidate((hold['start_ms']+hold['end_ms'])//2,[hold],False)
+        return candidates
+
     def _parse_candidates(
         self, stderr: str, start_ms: int, midpoint_ms: int, duration_ms: int
     ) -> list[dict]:
@@ -507,16 +609,13 @@ class BreakpointAnalyzer:
         for index, value in enumerate(starts):
             silence_ranges.append((value, ends[index] if index < len(ends) else value + 0.2))
         raw: list[tuple[float, str, dict]] = []
-        for match in re.finditer(
-            r"black_start:([0-9.]+)\s+black_end:([0-9.]+)\s+black_duration:([0-9.]+)", stderr
-        ):
-            left, right, length = map(float, match.groups())
-            point = (left + right) / 2
-            silent = any(a - 0.25 <= point <= b + 0.25 for a, b in silence_ranges)
-            raw.append((point, "fade", {"black_duration": length, "silence": silent}))
-        for value in re.findall(r"pts_time:([0-9.]+)", stderr):
-            raw.append((float(value), "scene", {"scene_change": True}))
-        by_second: dict[int, dict] = {}
+        for item in self._fade_intervals(stderr, start_ms):
+            point = (item['black_start_ms'] + item['black_end_ms']) / 2000 - start_ms / 1000
+            item['silence'] = any(a - .25 <= point <= b + .25 for a, b in silence_ranges)
+            raw.append((point, 'fade', item))
+        for value, scene_score in self._scene_events(stderr):
+            raw.append((value, "scene", {"scene_change": True, "scene_score":scene_score}))
+        by_second: dict[tuple[int,str], dict] = {}
         for relative, method, signals in raw:
             offset_ms = start_ms + round(relative * 1000)
             if not (self.minimum_segment_ms <= offset_ms <= duration_ms - self.minimum_segment_ms):
@@ -525,14 +624,14 @@ class BreakpointAnalyzer:
             proximity = max(0.0, 1.0 - distance / max(1, self.search_window_ms))
             score = 0.35 * proximity
             if method == "fade":
-                score += 0.45
+                score = .80 if signals.get("strict_black") else .70
                 if signals.get("silence"):
                     score += 0.20
             else:
                 score += 0.25
                 signals["silence"] = any(a - 0.5 <= relative <= b + 0.5
                                          for a, b in silence_ranges)
-            key = round(offset_ms / 1000)
+            key = (offset_ms, method)
             item = {
                 "offset_ms": offset_ms, "method": method,
                 "score": min(1.0, score), "signals": signals,
@@ -541,9 +640,96 @@ class BreakpointAnalyzer:
                 by_second[key] = item
         return sorted(by_second.values(), key=lambda item: item["offset_ms"])
 
-    def _store(self, asset_id, signature, candidates, selected, confidence, detail, *, status="analyzed"):
+    def _fade_intervals(self, stderr, start_ms):
+        samples, current = [], None
+        intervals = []
+        for line in stderr.splitlines():
+            match = re.search(r'pts_time:\s*(-?[\d.]+)', line)
+            if match:
+                current = float(match[1])
+            match = re.search(r'lavfi.signalstats.YAVG=([\d.]+)', line)
+            if match and current is not None:
+                samples.append((current, float(match[1])))
+            match = re.search(r'black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)', line)
+            if match:
+                left, right, length = map(float, match.groups())
+                intervals.append((left, right, length, 'blackdetect@noisy' not in line))
+        times = [point for point, _ in samples]
+
+        def values(left, right):
+            return samples[bisect_left(times, left):bisect_right(times, right)]
+
+        accepted = []
+        for left, right, length, strict in intervals:
+            evidence = {'strict_black': strict, 'noisy_black': not strict,
+                        'black_start_ms': start_ms + round(left * 1000),
+                        'black_end_ms': start_ms + round(right * 1000),
+                        'black_duration': length,
+                        'pixel_threshold': .10 if strict else self.NOISY_BLACK_PIXEL_THRESHOLD,
+                        'picture_threshold': .98 if strict else self.NOISY_BLACK_PICTURE_THRESHOLD}
+            if not strict:
+                before, during, after = values(left - 2, left), values(left, right), values(right, right + 2)
+                if not before or not during or not after or left <= times[0] or right >= times[-1]:
+                    continue
+                dark = min(v for _, v in during)
+                contrasts = [max(v for _, v in side) - dark for side in (before, after)]
+                run_start = last_fall = None
+                fade_ms = 0
+                fall_total = fall_max = fall_count = 0
+                sequence = before + during
+                for (previous_t, previous_v), (point, value) in zip(sequence, sequence[1:]):
+                    delta = previous_v - value
+                    if delta >= .5:
+                        if run_start is None:
+                            run_start = (previous_t, previous_v)
+                            fall_total = fall_max = fall_count = 0
+                        fall_total += delta
+                        fall_max = max(fall_max, delta)
+                        fall_count += 1
+                        last_fall = point
+                    elif delta < -2 or (last_fall is not None and point - last_fall > .1):
+                        run_start = last_fall = None
+                    if (run_start is not None and run_start[1] - value >= self.BLACK_CONTRAST
+                            and fall_count >= 3 and fall_max <= .8 * fall_total):
+                        fade_ms = max(fade_ms, round((last_fall - run_start[0]) * 1000))
+                if min(contrasts) < self.BLACK_CONTRAST or (length < .3 and fade_ms < 100):
+                    continue
+                evidence.update(luma_min=dark, before_contrast=contrasts[0],
+                                after_contrast=contrasts[1], fade_in_ms=fade_ms)
+            accepted.append(evidence)
+        # A strict interval contained in a tolerant one is the same physical fade.
+        merged = []
+        for item in sorted(accepted, key=lambda i: i['black_start_ms']):
+            if merged and item['black_start_ms'] <= merged[-1]['black_end_ms']:
+                previous = merged[-1]
+                previous['black_end_ms'] = max(previous['black_end_ms'], item['black_end_ms'])
+                previous['black_duration'] = (previous['black_end_ms'] - previous['black_start_ms']) / 1000
+                previous['strict_black'] |= item['strict_black']
+                previous['noisy_black'] |= item['noisy_black']
+                previous.setdefault('passes', []).append(item)
+            else:
+                merged.append(item)
+        return merged
+
+    def _store(self, *args, **kwargs):
+        with self.connection:
+            self._write_result(*args, **kwargs)
+
+    def _write_result(self, asset_id, signature, candidates, selected, confidence, detail, *, status="analyzed", layout=None, overrides=None, expected_layout=None, expected_manuals=None):
         selected_items = selected if isinstance(selected, list) else [selected]
         now = utc_now()
+        # One transaction publishes cuts, target numbering and manual timestamps.
+        self.connection.execute('SAVEPOINT publish_breaks')
+        # Acquire the write reservation before checking for a concurrent edit.
+        self.connection.execute('UPDATE asset_break_analyses SET asset_id=asset_id WHERE asset_id=?', (asset_id,))
+        latest = self.connection.execute('SELECT target_layout_json FROM asset_break_analyses WHERE asset_id=?', (asset_id,)).fetchone()
+        if ((latest[0] if latest is not None else None) != expected_layout
+                or expected_manuals is not None and self._manuals(asset_id) != expected_manuals):
+            raise ValueError('Act-break targets or manual choices changed during analysis; retry')
+        if overrides is not None:
+            self.connection.execute('DELETE FROM asset_break_overrides WHERE asset_id=?', (asset_id,))
+            self.connection.executemany('INSERT INTO asset_break_overrides(asset_id,target_index,offset_ms,updated_at) VALUES (?,?,?,?)',
+                                       [(asset_id, index, point, now) for index, point in overrides.items()])
         self.connection.execute("DELETE FROM asset_break_candidates WHERE asset_id=?", (asset_id,))
         for candidate in candidates:
             self.connection.execute(
@@ -582,6 +768,9 @@ class BreakpointAnalyzer:
                 confidence, detail, now,
             ),
         )
+        self.connection.execute('UPDATE asset_break_analyses SET target_layout_json=?,refresh_error=NULL WHERE asset_id=?',
+                                (json.dumps(layout, sort_keys=True), asset_id))
+        self.connection.execute('RELEASE publish_breaks')
         self.connection.commit()
 
     def _validate_offset(self, offset_ms: int, duration_ms: int) -> None:

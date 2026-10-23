@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from retrotv.config import AppConfig
 from retrotv.iptv import IPTVService, inspect_url
@@ -102,6 +102,60 @@ class QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self,*args):pass
 
 
+class UnsavedPreviewTests(unittest.TestCase):
+    def test_preview_proof_requires_decoded_advancing_video_and_survives_close(self):
+        from retrotv.iptv_preview import IPTVPreview
+        from retrotv.iptv import select_feed
+        preview=IPTVPreview(None)
+        payload={'url':'http://lan/live.ts','direct':True}
+        selection=select_feed(payload)
+        preview.selection=selection
+        preview.test_started=time.monotonic()
+        preview.state={'state':'connecting','test_id':'ticket','usable':False}
+        with self.assertRaisesRegex(ValueError,'Test this feed successfully'):
+            preview.validated_selection('ticket',payload)
+        player=Mock(spec=MpvIpcPlayer)
+        player.live_broken.return_value=False;player.live_ready.return_value=True
+        player._command.return_value=[{'type':'video'},{'type':'audio'}]
+        player.playback_position.side_effect=[0.,.1]
+        with patch('retrotv.playback.create_player',return_value=player),patch.object(preview.cancel,'wait',side_effect=[False,False,True]):
+            preview._run(selection['feed']['url'],None)
+        self.assertEqual(preview.stop()['state'],'passed')
+        self.assertEqual(preview.validated_selection('ticket',payload),selection)
+        self.assertIsNone(player.load.call_args.args[0].feed_id)
+        player.stop.assert_called_once()
+        for changed in [{**payload,'url':'http://other/live.ts'},{**payload,'direct':False},
+                        {**payload,'selection_key':'other'}]:
+            with self.assertRaisesRegex(ValueError,'selected feed changed'):
+                preview.validated_selection('ticket',changed)
+        with self.assertRaises(ValueError):preview.validated_selection('forged',payload)
+        preview.test_started-=1801
+        with self.assertRaises(ValueError):preview.validated_selection('ticket',payload)
+
+    def test_failed_preview_never_authorizes_creation(self):
+        from retrotv.iptv_preview import IPTVPreview
+        preview=IPTVPreview(None)
+        preview.state={'state':'connecting','test_id':'ticket','usable':False}
+        with patch('retrotv.playback.create_player',side_effect=RuntimeError('secret URL')):
+            preview._run('http://lan/live.ts',None)
+        self.assertEqual(preview.snapshot()['state'],'failed')
+        self.assertFalse(preview.snapshot()['usable'])
+        self.assertNotIn('secret',preview.snapshot()['detail'])
+        with self.assertRaises(ValueError):preview.validated_selection('ticket',{})
+
+    def test_closing_before_player_load_does_not_pass(self):
+        from retrotv.iptv_preview import IPTVPreview
+        preview=IPTVPreview(None)
+        preview.cancel.set()
+        player=Mock(spec=MpvIpcPlayer)
+        with patch('retrotv.playback.create_player',return_value=player):
+            preview._run('http://lan/live.ts',None)
+        self.assertEqual(preview.snapshot()['state'],'cancelled')
+        self.assertFalse(preview.snapshot()['usable'])
+        player.load.assert_not_called()
+        player.stop.assert_called_once()
+
+
 class RealLivePlaybackTests(unittest.TestCase):
     setUp=fixtures.SchedulingTests.setUp
     tearDown=fixtures.SchedulingTests.tearDown
@@ -147,9 +201,10 @@ class RealLivePlaybackTests(unittest.TestCase):
                 finally:player.stop()
             # Exercise the independent setup-time preview, not just its player.
             from retrotv.iptv_preview import IPTVPreview
-            feed=IPTVService(self.connection,config).register({'direct':True,'url':f'http://127.0.0.1:{server.server_port}/live.m3u8'})['id']
             preview=IPTVPreview(config)
-            preview.start(feed)
+            channels_before=self.connection.execute('SELECT COUNT(*) FROM channels').fetchone()[0]
+            payload={'direct':True,'url':f'http://127.0.0.1:{server.server_port}/live.m3u8'}
+            test=preview.start_selection(payload)
             deadline=time.monotonic()+12
             while time.monotonic()<deadline and preview.snapshot()['state']=='connecting':
                 time.sleep(.1)
@@ -157,6 +212,9 @@ class RealLivePlaybackTests(unittest.TestCase):
             preview.stop()
             self.assertFalse(preview.thread.is_alive())
             self.assertIsNone(preview.player)
+            self.assertEqual(preview.validated_selection(test['test_id'],payload)['feed']['url'],payload['url'])
+            self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM iptv_feeds').fetchone()[0],0)
+            self.assertEqual(self.connection.execute('SELECT COUNT(*) FROM channels').fetchone()[0],channels_before)
 
             player=MpvIpcPlayer(config,executable=str(mpv))
             try:

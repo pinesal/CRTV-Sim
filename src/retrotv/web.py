@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import closing
+from contextlib import closing, ExitStack
 import base64
 import binascii
 import os
@@ -34,6 +34,8 @@ from retrotv.credentials import (configured_breeze_api_key, save_breeze_key, rem
 from retrotv.tts import BreezeTTSProvider, provider_for_profile
 from types import SimpleNamespace
 from retrotv.channel_management import ChannelDeletionService
+from retrotv.channel_folder_review import ChannelFolderReview
+from retrotv.channel_admin_ui import CHANNEL_ADMIN_HTML, CHANNEL_ADMIN_JS
 from retrotv.blocks import BlockService
 from retrotv.breakpoints import BreakpointAnalyzer
 from retrotv.bumper_cues import bumper_review_catalog, save_bumper_override
@@ -372,7 +374,7 @@ DASHBOARD_HTML = """<!doctype html>
         $("normalization-result").textContent = maintenance.normalization ?
           `${maintenance.normalization.processed} processed; ${maintenance.normalization.review} review; ${maintenance.normalization.errors} errors` : "—";
         $("breakpoint-result").textContent = maintenance.breakpoints ?
-          `${maintenance.breakpoints.processed} processed; ${maintenance.breakpoints.natural} natural; ${maintenance.breakpoints.quiet_pause ?? 0} quiet-pause fallback; ${maintenance.breakpoints.midpoint} midpoint; ${maintenance.breakpoints.errors} errors` : "—";
+          `${maintenance.breakpoints.processed} processed; ${maintenance.breakpoints.natural} natural; ${maintenance.breakpoints.still_card ?? 0} still-card; ${maintenance.breakpoints.quiet_pause ?? 0} quiet-pause fallback; ${maintenance.breakpoints.scene_fallback ?? 0} scene-transition fallback; ${maintenance.breakpoints.midpoint} midpoint; ${maintenance.breakpoints.errors} errors` : "—";
         $("audio-maintenance-result").textContent = maintenance.audio ?
           `${maintenance.audio.processed} processed; ${maintenance.audio.correction_needed} correction; ${maintenance.audio.review} review; ${maintenance.audio.errors} errors` : "—";
         $("schedules-created").textContent = maintenance.schedules_created ?? "—";
@@ -814,6 +816,11 @@ INDEX_HTML = """<!doctype html>
     .section-body { padding: 14px; }
     .section-body > :first-child { margin-top: 0; }
     .section-body > :last-child { margin-bottom: 0; }
+    .panel-count { display:inline-block; margin-left:8px; padding:2px 8px;
+      border:1px solid var(--line); border-radius:99px; color:var(--muted);
+      font-size:13px; font-weight:500; vertical-align:middle; }
+    .panel-count.has-pending { color:var(--warn); border-color:var(--warn); }
+    .panel-count.count-stale { border-style:dashed; }
     .schedule-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
     .schedule-toolbar {
       display: grid;
@@ -968,7 +975,7 @@ INDEX_HTML = """<!doctype html>
       <button id="collapse-sections">Collapse all</button>
     </div>
     <details class="collapsible" data-section="external-media" id="external-media-panel">
-      <summary><h2>External Media Sources</h2></summary>
+      <summary><h2>External Media Sources <span id="external-action-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p>Use an existing series folder without copying or changing its files. External media is always read-only. Scheduled channels only; At Your Pace support is planned for Phase 1B.</p>
         <div class="toolbar">
@@ -988,7 +995,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details class="collapsible" data-section="media-library" open>
-      <summary><h2>Media Library</h2></summary>
+      <summary><h2>Media Library <span id="library-review-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <section id="stats" class="stats"></section>
         <div id="notice" class="notice" role="status"></div>
@@ -1026,7 +1033,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details class="collapsible" data-section="bumper-cue-review" open>
-      <summary><h2>Bumper Placement Review <span id="bumper-review-count" class="pill">0</span></h2></summary>
+      <summary><h2>Bumper Placement Review <span id="bumper-review-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Bumpers needing review are held out of scheduling when their detected show cannot be matched. Mark a mistaken detection as General, or choose Break start/Break end and link the correct show. An empty show means the bumper can play with any show at that break boundary. Decisions affect future schedules and can be changed under All classified and saved.</p>
         <select id="bumper-review-filter"><option value="pending">Needs review</option><option value="all">All classified and saved</option></select>
@@ -1042,7 +1049,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details class="collapsible" data-section="programming-inventory" open>
-      <summary><h2>Programming Inventory</h2></summary>
+      <summary><h2>Programming Inventory <span id="inventory-review-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">See which series, movies, blocks, and interstitial pools
           are available to each channel and scheduling collection. Episode and short
@@ -1091,7 +1098,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details class="collapsible" data-section="shadow-files" open>
-      <summary><h2>Shadow Files</h2></summary>
+      <summary><h2>Shadow Files <span id="shadow-review-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Create lightweight scheduling placements that reuse an
           existing video's conversion, audio analysis, and act breaks. Folder batches
@@ -1115,11 +1122,12 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details class="collapsible" data-section="duplicate-media" open>
-      <summary><h2>Duplicate Media Review</h2></summary>
+      <summary><h2>Duplicate Media Review <span id="duplicate-review-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Exact SHA-256 matches remain separate scheduling assets.
           CRTV Sim reuses compatible analysis and corrected output so identical files
-          are not needlessly re-encoded.</p>
+          are not needlessly re-encoded. Matches use original content hashes;
+          normalized working copies may differ.</p>
         <section id="duplicate-stats" class="stats"></section>
         <section class="toolbar">
           <select id="duplicate-filter">
@@ -1129,6 +1137,10 @@ INDEX_HTML = """<!doctype html>
           </select>
           <button id="refresh-duplicates">Refresh duplicates</button>
         </section>
+        <p class="muted">Click a file to view it in a new tab. Delete copy removes only that file;
+          its scheduling placement is removed, and shadows targeting it may need review.
+          External media is read-only. Stop TV before deleting media.</p>
+        <div id="duplicate-message" role="status" aria-live="polite"></div>
         <section class="table-wrap">
           <table>
             <thead><tr><th>Status</th><th>Copies</th><th>Duplicated space</th>
@@ -1160,6 +1172,19 @@ INDEX_HTML = """<!doctype html>
         <button id="shadow-confirm">Create shadow files</button>
       </div>
     </dialog>
+    <dialog id="duplicate-delete-dialog">
+      <h2>Delete this duplicate copy?</h2>
+      <p id="duplicate-delete-path" class="path"></p>
+      <p>This permanently deletes the selected video. Other copies and backups stay on disk.
+        Its scheduling placement is removed; existing schedules may show continuity until rebuilt.</p>
+      <p id="duplicate-delete-effects"></p>
+      <div id="duplicate-delete-remaining" class="path"></div>
+      <div id="duplicate-delete-error" role="alert"></div>
+      <div class="actions">
+        <button id="duplicate-delete-cancel">Cancel</button>
+        <button id="duplicate-delete-confirm" class="danger">Delete this copy</button>
+      </div>
+    </dialog>
     <dialog id="shadow-delete-dialog">
       <h2>Delete shadow files?</h2>
       <p id="shadow-delete-summary"></p>
@@ -1171,7 +1196,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </dialog>
     <details class="collapsible" data-section="holiday-filename-review" open>
-      <summary><h2>Holiday Filename Review</h2></summary>
+      <summary><h2>Holiday Filename Review <span id="holiday-review-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Filename clues are suggestions only. Files remain eligible for scheduling. Choose the destination folder yourself; CRTV Sim never moves a file automatically.</p>
         <section class="toolbar"><button id="refresh-holiday-reviews">Refresh suggestions</button></section>
@@ -1192,7 +1217,7 @@ INDEX_HTML = """<!doctype html>
       <div class="dialog-actions"><button id="holiday-move-cancel">Cancel</button><button id="holiday-move-confirm">Move file</button></div>
     </dialog>
     <details class="collapsible" data-section="act-breaks" open>
-      <summary><h2>Act Breaks</h2></summary>
+      <summary><h2>Act Breaks <span id="break-analysis-count" class="panel-count" title="Loading status">…</span> <span id="break-fallback-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Eligible episodes and movies are analyzed throughout their runtime.
           Each proposed break shows its detected cue or a recorded fallback. These
@@ -1203,7 +1228,9 @@ INDEX_HTML = """<!doctype html>
             <option value="pending">Pending analysis</option>
             <option value="analyzed">Analyzed</option>
             <option value="fallback">All fallback breaks</option>
+            <option value="still_card">Still-card cues</option>
             <option value="quiet_pause">Quiet-pause fallback</option>
+            <option value="scene_fallback">Scene-transition fallback</option>
             <option value="midpoint">Generic halfway fallback</option>
             <option value="manual">Manual overrides</option>
           </select>
@@ -1336,7 +1363,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details class="collapsible" data-section="weather-graphics">
-      <summary><h2>Weather Graphics</h2></summary>
+      <summary><h2>Weather Graphics <span id="weather-action-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Upload backgrounds or generate artwork for each weather condition and time of day. Holiday layers follow the holidays and date ranges in Settings. Artwork is used automatically on the next Weather render; existing files can rotate.</p>
         <label for="weather-art-direction">Weather artwork creative direction</label>
@@ -1348,7 +1375,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details class="collapsible" data-section="channel-graphics" open>
-      <summary><h2>Channel Graphics</h2></summary>
+      <summary><h2>Channel Graphics <span id="graphics-action-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Up-next backgrounds and ten-second station cards are kept
           outside the program library. Holiday and active weekly-special folders take precedence automatically.
@@ -1374,14 +1401,18 @@ INDEX_HTML = """<!doctype html>
           </select>
           <input id="graphic-file" type="file" accept=".png,.jpg,.jpeg,.webp,.mp4,.mkv,.webm,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus">
           <button id="upload-graphic">Add graphic</button>
+          <button id="refresh-channel-graphics">Refresh channel graphics</button>
           <button id="regenerate-placeholder">Regenerate placeholder</button>
         </section>
         <section class="toolbar">
           <label class="graphic-art-direction">AI art direction
             <textarea id="graphic-art-direction" placeholder="Optional: describe the era, mood, palette, motifs, or seasonal direction."></textarea>
           </label>
-          <button id="generate-graphic">Generate and use AI graphic</button>
+          <label><input id="graphic-include-station-name" type="checkbox" checked> Include station name and logo in AI artwork</label>
+          <button id="generate-graphic" data-graphic-generation>Generate and use AI graphic</button>
         </section>
+        <p class="muted">Uncheck to request an unbranded background without automatically sending the station name. The image still belongs to the selected channel. Your art-direction text is always sent as written.</p>
+        <div id="graphic-generation-status" class="notice" role="status" aria-live="polite"></div>
         <h3>Graphics To Do <span id="graphics-todo-count" class="pill">0</span></h3>
         <p class="muted">Generated placeholders that do not yet have a replacement in the same channel, weekly special, daypart, holiday, and purpose. AI graphics are installed immediately and can be regenerated, replaced, or deleted here.</p>
         <section class="table-wrap">
@@ -1401,7 +1432,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
     <details id="station-announcers" class="collapsible" data-section="station-announcers" open>
-      <summary><h2>Station Announcer Profiles</h2></summary>
+      <summary><h2>Station Announcer Profiles <span id="announcer-action-count" class="panel-count" title="Loading status">…</span></h2></summary>
       <div class="section-body">
         <p class="muted">Dynamic announcements use the upcoming schedule and are generated only for the actively watched channel inside the demand window. Generate each generic voice once so it can be reused whenever dynamic generation is unavailable.</p>
         <p id="announcer-key-status" class="muted"></p>
@@ -1456,14 +1487,100 @@ INDEX_HTML = """<!doctype html>
       });
     }
 
+    // Heading counts never depend on a filtered/paginated table or on building
+    // the expensive Programming Inventory. Refresh without touching open forms.
+    const panelCountIds = ["external-action-count", "library-review-count", "inventory-review-count",
+      "bumper-review-count", "shadow-review-count", "duplicate-review-count", "holiday-review-count",
+      "break-analysis-count", "break-fallback-count"];
+    let panelCountRevision = 0, panelCountTimer = null, panelCountBusy = false;
+    function setPanelCount(id, count, label, detail) {
+      const node = $(id);
+      if (!node || !Number.isInteger(count) || count < 0) return;
+      node.textContent = `${count} ${label}`;
+      node.title = detail;
+      node.setAttribute("aria-label", `${count} ${label}. ${detail}`);
+      node.dataset.countLoaded = "true";
+      node.classList.toggle("has-pending", count > 0);
+      node.classList.remove("count-stale");
+    }
+    function markPanelCountStale(id) {
+      const node = $(id);
+      if (!node) return;
+      node.classList.add("count-stale");
+      if (!node.dataset.countLoaded) node.textContent = "Status unavailable";
+      node.title = "Could not refresh this count. Any number shown is the last known count.";
+      node.setAttribute("aria-label", `${node.textContent}. ${node.title}`);
+    }
+    function queuePanelCounts() {
+      panelCountRevision++;
+      clearTimeout(panelCountTimer);
+      panelCountTimer = setTimeout(loadPanelCounts, 250);
+    }
+    async function loadPanelCounts() {
+      if (panelCountBusy || document.hidden) return;
+      panelCountBusy = true;
+      const revision = panelCountRevision;
+      try {
+        const data = await api("/api/library/action-counts");
+        if (revision === panelCountRevision) {
+          for (const [id, item] of Object.entries(data.counts))
+            setPanelCount(id, item.count, item.label, item.detail);
+        }
+      } catch (_) {
+        if (revision === panelCountRevision) panelCountIds.forEach(markPanelCountStale);
+      } finally {
+        panelCountBusy = false;
+        if (revision !== panelCountRevision) {
+          clearTimeout(panelCountTimer);
+          panelCountTimer = setTimeout(loadPanelCounts, 250);
+        }
+      }
+    }
+    function updatePanelCounts(path, data) {
+      const route = path.split("?")[0];
+      if (route === "/api/duplicates") setPanelCount("duplicate-review-count", data.pending, "review",
+        "Pending duplicate sets, not individual copies. Intentional sets are excluded.");
+      if (route === "/api/shadows") setPanelCount("shadow-review-count", data.summary.review, "review", "Shadow files needing review.");
+      if (route === "/api/bumper-cues/review") setPanelCount("bumper-review-count", data.pending_count, "review", "Bumpers with an unmatched series clue.");
+      if (route === "/api/holiday-reviews") setPanelCount("holiday-review-count", data.items.length, "review", "Pending holiday filename suggestions.");
+      if (route === "/api/graphics") setPanelCount("graphics-action-count", data.placeholder_todo_count ?? data.placeholder_todo?.length ?? 0,
+        "to replace", "Optional: generated placeholder graphics available for replacement with your own artwork.");
+      if (route === "/api/weather-graphics") setPanelCount("weather-action-count",
+        data.slots.reduce((total, slot) => total + slot.assets.filter(asset => !asset.valid).length, 0),
+        "invalid files", "Installed artwork that failed validation. Built-in backgrounds and absent optional holiday layers are not issues.");
+      if (route === "/api/announcement-profiles") setPanelCount("announcer-action-count",
+        data.items.filter(profile => ((!profile.daypart_slug && !profile.weekly_collection_slug) || profile.override_enabled)
+          && !profile.generic?.usable && profile.generic?.status !== "generating"
+          && (profile.generic?.status === "failed" || profile.generic?.audio_path)).length,
+        "recording issues", "Failed or unusable generic recordings in active profiles. A usable previous recording is not an issue; never-generated optional recordings are excluded.");
+    }
     async function api(path, options) {
-      const response = await fetch(path, options);
+      const countRevision = panelCountRevision;
+      let response;
+      try {
+        response = await fetch(path, options);
+        if (!response.ok) throw new Error("Request failed");
+      } catch (error) {
+        const id = {"/api/duplicates":"duplicate-review-count", "/api/shadows":"shadow-review-count",
+          "/api/bumper-cues/review":"bumper-review-count", "/api/holiday-reviews":"holiday-review-count",
+          "/api/graphics":"graphics-action-count", "/api/weather-graphics":"weather-action-count",
+          "/api/announcement-profiles":"announcer-action-count"}[path.split("?")[0]];
+        if (id && countRevision === panelCountRevision) markPanelCountStale(id);
+        if (!response) throw error;
+      }
       if (!response.ok) {
         let message = await response.text();
         try { message = JSON.parse(message).error || message; } catch (_) {}
         throw new Error(message);
       }
-      return response.json();
+      const data = await response.json();
+      if (options?.method && options.method.toUpperCase() !== "GET") {
+        // Scrubbing and frame previews do not change review queues.
+        const workshopRead = path.endsWith("/act-break-workshop")
+          && !["save", "reset"].includes(JSON.parse(options.body || "{}").action);
+        if (!workshopRead) queuePanelCounts();
+      } else if (countRevision === panelCountRevision) updatePanelCounts(path, data);
+      return data;
     }
 
     function notice(message, kind = "success") {
@@ -1573,7 +1690,6 @@ INDEX_HTML = """<!doctype html>
     let inventoryData = null;
     async function loadBumperReview() {
       const data = await api("/api/bumper-cues/review");
-      $("bumper-review-count").textContent = data.pending_count;
       $("bumper-series-options").replaceChildren(
         ...data.series.map(title => new Option(title, title))
       );
@@ -2004,6 +2120,53 @@ INDEX_HTML = """<!doctype html>
       return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[index]}`;
     }
 
+    let duplicateDeletePreview = null;
+    let duplicateDeleteBusy = false;
+    async function previewDuplicateDeletion(member, hash) {
+      if (duplicateDeleteBusy) return;
+      duplicateDeleteBusy = true;
+      duplicateDeletePreview = null;
+      try {
+        const preview = await api("/api/duplicates/deletion-preview", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({asset_id:member.id, sha256:hash})
+        });
+        duplicateDeletePreview = preview;
+        $("duplicate-delete-path").textContent = preview.path;
+        $("duplicate-delete-effects").textContent = `${preview.shadows.length} shadow placement(s) reference this copy. ` +
+          "They may need review; rescanning can reconnect them to a matching remaining copy.";
+        $("duplicate-delete-remaining").textContent = "Copies kept: " + preview.remaining.map(item => item.path).join("; ");
+        $("duplicate-delete-error").textContent = "";
+        $("duplicate-delete-dialog").showModal();
+      } catch (error) { $("duplicate-message").textContent = error.message; }
+      finally { duplicateDeleteBusy = false; }
+    }
+    async function deleteDuplicateCopy() {
+      if (!duplicateDeletePreview || duplicateDeleteBusy) return;
+      duplicateDeleteBusy = true;
+      $("duplicate-delete-confirm").disabled = true;
+      $("duplicate-delete-cancel").disabled = true;
+      try {
+        const result = await api("/api/duplicates/delete", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({asset_id:duplicateDeletePreview.asset_id,
+            sha256:duplicateDeletePreview.sha256, token:duplicateDeletePreview.token})
+        });
+        duplicateDeletePreview = null;
+        $("duplicate-delete-dialog").close();
+        $("duplicate-message").textContent = `Deleted ${result.deleted}. Other copies were kept. ` +
+          (result.maintenance_queued ? "Maintenance queued to refresh future schedules." : "Future schedules will refresh during maintenance.");
+        if (result.refresh_warning) $("duplicate-message").textContent += ` ${result.refresh_warning}`;
+        try {
+          await Promise.all([loadDuplicates(), loadShadows(), loadStats(), loadInventory()]);
+        } catch (error) { $("duplicate-message").textContent += ` Could not refresh the panels: ${error.message}`; }
+      } catch (error) { $("duplicate-delete-error").textContent = error.message; }
+      finally {
+        duplicateDeleteBusy = false;
+        $("duplicate-delete-confirm").disabled = false;
+        $("duplicate-delete-cancel").disabled = false;
+      }
+    }
     async function reviewDuplicate(hash, action) {
       try {
         await api(`/api/duplicates/${hash}`, {
@@ -2040,7 +2203,24 @@ INDEX_HTML = """<!doctype html>
           const assignment = member.collection_slug ?
             `${member.channel_slug || "shared"} / ${member.collection_type} / ${member.collection_slug}` :
             `${member.channel_slug || "shared"} / ${member.daypart_slug || "all-day"}`;
-          line.textContent = `#${member.id} ${member.source_relative_path} — ${assignment}`;
+          const link = document.createElement("a");
+          link.href = `/api/assets/${encodeURIComponent(member.id)}/play`;
+          link.target = "_blank"; link.rel = "noopener";
+          link.textContent = `#${member.id} ${member.source_relative_path}`;
+          link.title = "Open this video in a new tab";
+          const placement = document.createElement("span");
+          placement.textContent = ` — ${assignment} `;
+          line.append(link, placement);
+          if (member.source_kind === "external") {
+            const label = document.createElement("span"); label.textContent = "External — read-only";
+            line.append(label);
+          } else {
+            const remove = document.createElement("button");
+            remove.textContent = "Delete copy";
+            remove.title = `Delete only ${member.source_relative_path}`;
+            remove.onclick = () => previewDuplicateDeletion(member, group.sha256);
+            line.append(remove);
+          }
           locations.append(line);
         }
         const actions = addCell(row, "", "actions");
@@ -2197,6 +2377,7 @@ INDEX_HTML = """<!doctype html>
     }
     let graphicWeeklyDestination = "";
     let graphicReplacement = null;
+    let graphicGenerationBusy = false;
 
     function assetFolder(item) {
       const normalized = String(item.source_relative_path || "").replaceAll("\\\\", "/");
@@ -2771,6 +2952,9 @@ INDEX_HTML = """<!doctype html>
       } catch (error) { notice(`Asset ${id}: ${error.message}`, "error"); }
     }
 
+    function breakpointMethodLabel(method) {
+      return ({still_card:"Still-card cue",scene_fallback:"Scene-transition fallback",quiet_pause:"Quiet-pause fallback",midpoint:"Generic midpoint"})[method] || method;
+    }
     async function loadBreakpoints() {
       window.ActBreakWorkshopUI?.current?.close();
       const params = new URLSearchParams({limit: "250"});
@@ -2803,9 +2987,12 @@ INDEX_HTML = """<!doctype html>
           ? selectedOffsets.map(formatBreakpoint).join(", ") : "—");
         const evidence = (item.selected_evidence || []).map(candidate => {
           const signals = candidate.signals || {};
-          const transition = candidate.method === "quiet_pause"
+          const transition = candidate.method === "still_card"
+            ? `Still-card cue (${(signals.holds || []).map(h => (h.duration_ms/1000).toFixed(2)+'s').join(' + ')}; ${signals.paired_cards ? 'between cards' : 'within hold'})`
+            : candidate.method === "scene_fallback" ? "Scene-transition fallback (no silence required)"
+            : candidate.method === "quiet_pause"
             ? `Quiet-pause fallback (${(Number(signals.silence_duration_ms) / 1000).toFixed(2)}s at ${signals.silence_threshold_db} dB)`
-            : signals.black_duration ? `black ${Number(signals.black_duration).toFixed(2)}s` :
+            : signals.black_duration ? `${signals.noisy_black ? "VHS-tolerant" : "Strict"} black ${Number(signals.black_duration).toFixed(2)}s${signals.outside_preferred_window ? "; outside preferred window" : ""}` :
             signals.scene_change ? "scene change" : candidate.method;
           const silence = signals.silence && candidate.method !== "quiet_pause" ? ", silence" : "";
           const chapter = signals.chapter_supported
@@ -2815,6 +3002,11 @@ INDEX_HTML = """<!doctype html>
         addCell(row, evidence.join("; ") || item.selected_method || "—");
         addCell(row, item.confidence == null ? "—" : Number(item.confidence).toFixed(2));
         const actions = addCell(row, "", "actions");
+        const cadence = document.createElement('small');
+        cadence.textContent = `${item.normal_package_ms/60000}-minute package; ${item.intended_count} normal opportunities. ` +
+          (item.manual_overflow ? 'Extra legacy manual cuts retained; no automatic additions. ' : '') +
+          (item.refresh_error ? `${item.selected_evidence?.length ? 'Refresh failed; previous cuts retained' : 'Analysis failed; retry needed'}: ${item.refresh_error}` : '');
+        actions.append(cadence);
         const targetControls = new Map();
         const workshopButton = document.createElement("button");
         workshopButton.textContent = "Open workshop";
@@ -2824,12 +3016,12 @@ INDEX_HTML = """<!doctype html>
           onSaved: updated => {
             row.children[3].textContent = updated.break_status || "manual";
             row.children[4].textContent = (updated.selected_evidence || []).map(c => formatBreakpoint(c.offset_ms)).join(", ") || "—";
-            row.children[5].textContent = (updated.selected_evidence || []).map(c => `${formatBreakpoint(c.offset_ms)}: ${c.method}${c.signals?.reason ? `; ${c.signals.reason}` : ""}`).join("; ");
+            row.children[5].textContent = (updated.selected_evidence || []).map(c => `${formatBreakpoint(c.offset_ms)}: ${breakpointMethodLabel(c.method)}${c.signals?.reason ? `; ${c.signals.reason}` : ""}`).join("; ");
             row.children[6].textContent = updated.confidence == null ? "—" : Number(updated.confidence).toFixed(2);
             for (const target of updated.targets || []) {
               const controls = targetControls.get(target.index);
               if (!controls) continue;
-              controls.current.textContent = target.selected ? `${formatBreakpoint(target.selected.offset_ms)} — ${target.selected.method}` : "no selected break";
+              controls.current.textContent = target.selected ? `${formatBreakpoint(target.selected.offset_ms)} — ${breakpointMethodLabel(target.selected.method)}` : "no selected break";
               controls.manual.value = target.selected ? formatBreakpoint(target.selected.offset_ms) : "";
               controls.reset.hidden = !target.manual;
             }
@@ -2845,7 +3037,7 @@ INDEX_HTML = """<!doctype html>
           label.textContent = `Break ${target.index} (near ${formatBreakpoint(target.target_ms)}): `;
           const current = document.createElement("span");
           current.textContent = target.selected
-            ? `${formatBreakpoint(target.selected.offset_ms)} — ${target.selected.method === "quiet_pause" ? "Quiet-pause fallback" : target.selected.method} (${Number(target.selected.score).toFixed(2)})${target.selected.signals?.reason ? `; ${target.selected.signals.reason}` : ""}`
+            ? `${formatBreakpoint(target.selected.offset_ms)} — ${breakpointMethodLabel(target.selected.method)} (${Number(target.selected.score).toFixed(2)})${target.selected.signals?.reason ? `; ${target.selected.signals.reason}` : ""}`
             : "no selected break";
           const manual = document.createElement("input"); manual.placeholder = "HH:MM:SS";
           manual.value = target.selected ? formatBreakpoint(target.selected.offset_ms) : "";
@@ -3295,6 +3487,8 @@ INDEX_HTML = """<!doctype html>
         };
         const generate = document.createElement("button");
         generate.textContent = "Generate and use AI";
+        generate.setAttribute("data-graphic-generation", "");
+        generate.disabled = graphicGenerationBusy;
         generate.onclick = () => generateGraphic(item);
         action.append(replace, generate); row.append(action); return row;
       }));
@@ -3313,6 +3507,8 @@ INDEX_HTML = """<!doctype html>
         if (item.catalog_kind === "graphic" && item.provenance === "ai") {
           const regenerate = document.createElement("button");
           regenerate.textContent = "Regenerate";
+          regenerate.setAttribute("data-graphic-generation", "");
+          regenerate.disabled = graphicGenerationBusy;
           regenerate.onclick = () => generateGraphic(item);
           const replace = document.createElement("button");
           replace.textContent = "Replace with file";
@@ -3321,6 +3517,7 @@ INDEX_HTML = """<!doctype html>
           remove.textContent = "Delete";
           remove.onclick = () => deleteAIGraphic(item);
           const variation = document.createElement("button"); variation.textContent = "Generate variation";
+          variation.setAttribute("data-graphic-generation", ""); variation.disabled = graphicGenerationBusy;
           variation.onclick = () => generateGraphic(item, true);
           actions.append(regenerate, variation, replace, remove);
         }
@@ -3576,23 +3773,48 @@ INDEX_HTML = """<!doctype html>
       };
     }
 
+    function graphicGenerationStatus(message, kind = "success") {
+      const status = $("graphic-generation-status");
+      status.textContent = message;
+      status.className = `notice ${kind}`;
+      notice(message, kind);
+    }
+
+    function setGraphicGenerationBusy(busy) {
+      graphicGenerationBusy = busy;
+      document.querySelectorAll("[data-graphic-generation]").forEach(button => { button.disabled = busy; });
+    }
+
     async function generateGraphic(item = null, variation = false) {
-      const scope = graphicScope(item);
-      if (scope.purpose === "channel-music") return notice("AI generation creates Up Next or interstitial images, not channel music.", "error");
+      if (graphicGenerationBusy) return;
+      setGraphicGenerationBusy(true);
       try {
+        const scope = graphicScope(item);
+        if (scope.purpose === "channel-music") {
+          graphicGenerationStatus("AI generation creates Up Next or interstitial images, not channel music.", "error");
+          return;
+        }
+        graphicGenerationStatus("Preparing the graphic request…");
         if (!variation) {
           const existing = await api("/api/graphics");
           const matches = existing.items.some(g => g.provenance === "ai" && g.channel_slug === scope.channel && g.purpose === scope.purpose && (g.daypart_slug || "") === scope.daypart && (g.holiday_slug || "") === scope.holiday && (g.weekly_collection_slug || "") === scope.weekly);
-          if (matches && !confirm("Replace every AI graphic in this exact scope, including all variations?")) return;
+          if (matches && !confirm("Replace every AI graphic in this exact scope, including all variations?")) {
+            graphicGenerationStatus("Graphic generation cancelled.");
+            return;
+          }
         }
-        notice(variation ? "Generating a separate graphic variation…" : "Generating and installing the AI graphic…");
+        graphicGenerationStatus(variation ? "Generating a separate graphic variation… This may take a few minutes." : "Generating and installing the AI graphic… This may take a few minutes.");
         await api("/api/graphics/generate", {
           method:"POST", headers:{"Content-Type":"application/json"},
           body:JSON.stringify({action:variation ? "variation" : "install", graphic_id:item?.id, ...scope,
+            include_station_name:$("graphic-include-station-name").checked,
             art_note:$("graphic-art-direction").value.trim()})
         });
-        notice(variation ? "Graphic variation added to the rotation." : "AI graphic installed and ready to use."); await loadGraphics();
-      } catch (error) { notice(error.message, "error"); }
+        graphicGenerationStatus(variation ? "Graphic variation added to the rotation." : "AI graphic installed and ready to use.");
+        try { await loadGraphics(); }
+        catch (error) { graphicGenerationStatus(`Graphic installed, but the graphics list could not refresh: ${error.message}`, "error"); }
+      } catch (error) { graphicGenerationStatus(error.message, "error"); }
+      finally { setGraphicGenerationBusy(false); }
     }
 
     function chooseGraphicReplacement(item) {
@@ -3709,6 +3931,9 @@ INDEX_HTML = """<!doctype html>
     }
 
     initializeCollapsibleSections();
+    loadPanelCounts();
+    setInterval(() => { if (!document.hidden) loadPanelCounts(); }, 60000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) loadPanelCounts(); });
     let timer;
     $("search").addEventListener("input", () => {
       clearTimeout(timer);
@@ -3763,6 +3988,13 @@ INDEX_HTML = """<!doctype html>
       clearTimeout(inventoryTimer); inventoryTimer = setTimeout(renderInventory, 150);
     });
     $("refresh-duplicates").addEventListener("click", loadDuplicates);
+    $("duplicate-delete-confirm").addEventListener("click", deleteDuplicateCopy);
+    $("duplicate-delete-cancel").addEventListener("click", () => {
+      duplicateDeletePreview = null; $("duplicate-delete-dialog").close();
+    });
+    $("duplicate-delete-dialog").addEventListener("cancel", event => {
+      if (duplicateDeleteBusy) event.preventDefault(); else duplicateDeletePreview = null;
+    });
     $("duplicate-filter").addEventListener("change", loadDuplicates);
     $("refresh-breakpoints").addEventListener("click", loadBreakpoints);
     $("refresh-holiday-reviews").addEventListener("click", loadHolidayReviews);
@@ -3800,6 +4032,16 @@ INDEX_HTML = """<!doctype html>
       if (graphicReplacement && $("graphic-file").files[0]) uploadGraphic();
     });
     $("generate-graphic").addEventListener("click", () => generateGraphic());
+    $("refresh-channel-graphics").addEventListener("click", async () => {
+      if (graphicGenerationBusy) return;
+      const button = $("refresh-channel-graphics"); button.disabled = true;
+      graphicGenerationStatus("Refreshing the graphics catalog…");
+      try {
+        await loadGraphics();
+        graphicGenerationStatus("Graphics catalog refreshed. Added artwork will be used on the next screen; retune to refresh a loading cover.");
+      } catch (error) { graphicGenerationStatus(error.message, "error"); }
+      finally { button.disabled = false; }
+    });
     $("regenerate-placeholder").addEventListener("click", regeneratePlaceholder);
     $("graphic-channel").addEventListener("change", () => { graphicWeeklyDestination = ""; });
     function updateGraphicDestinationControls() {
@@ -3816,16 +4058,12 @@ INDEX_HTML = """<!doctype html>
         load(), loadHolidayReviews(), loadBumperReview(), loadInventory(), loadShadows(), loadDuplicates(), loadBreakpoints(), loadSchedule(), loadSchedulePreferences(), loadProgrammingRules(), loadBlocks(), loadGraphics(), loadWeatherGraphics(), loadAnnouncerProfiles()
       ]);
     }
-    initialize().catch((error) => document.body.textContent = error);
+    initialize().catch((error) => notice(error.message || String(error), "error"));
   </script>
 </body>
 </html>
 """
 
-
-INDEX_HTML = INDEX_HTML.replace('<details class="collapsible" data-section="external-media"',
-    IPTV_HTML + '<details class="collapsible" data-section="external-media"', 1).replace(
-        '</body>', '<script>' + IPTV_JS + '</script></body>', 1)
 
 INTERNET_MEDIA_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -3842,7 +4080,7 @@ INTERNET_MEDIA_HTML = """<!doctype html>
 <section class="panel"><h2>Add a source</h2><div class="form"><label>Channel<select id="source-channel"></select></label><label>Show name<input id="show-title" placeholder="WWF Raw"></label><label>Daypart<select id="daypart"><option>all-day</option><option>morning</option><option>afternoon</option><option>evening</option><option>night</option></select></label><label class="wide">Internet Archive item or direct video URL<input id="source-url" type="url" placeholder="https://archive.org/details/WAR-1998"></label><div class="wide actions"><button id="preview" class="primary">Preview catalog</button><button id="add-source" disabled>Add selected episodes</button></div></div><div id="source-message" class="message"></div></section></div>
 <section class="panel"><h2>Change watching position</h2><p>A new Watch at Your Pace channel will not prepare or play episodes until you choose where to begin.</p><div class="form"><label>Watch at Your Pace channel<select id="position-channel"></select></label><label>Start on or after<input id="position-date" type="date"></label><label>Initial timestamp (seconds)<input id="position-seconds" type="number" min="0" step="1" value="0"></label><div class="actions"><button id="start-beginning">Start at first episode</button><button id="start-date" class="primary">Set date position</button></div></div><div id="position-message" class="message"></div></section>
 <section class="panel"><h2>Delete a channel</h2><p>This removes the channel's database records, Internet Media source files, and unfinished downloads. Finished media and backups stay on disk. A later scan will recreate the channel when its media folder remains.</p><div class="form"><label>Channel<select id="delete-channel"></select></label><div class="actions"><button id="preview-delete" class="danger">Review deletion</button></div></div><div id="delete-message" class="message"></div></section>
-<dialog id="delete-dialog"><h2>Delete <span id="delete-name"></span>?</h2><p id="delete-summary"></p><p class="warn">This deletes the channel's database setup and source definitions. Finished media remains and can recreate the channel during scanning.</p><label><input id="delete-ack" type="checkbox"> I understand preserved media can make the scanner recreate this channel.</label><label>Type <strong id="delete-required"></strong><input id="delete-confirmation" autocomplete="off"></label><div class="actions"><button id="cancel-delete">Cancel</button><button id="confirm-delete" class="danger">Delete channel</button></div></dialog>
+<dialog id="delete-dialog"><h2>Delete <span id="delete-name"></span>?</h2><p id="delete-summary"></p><p class="warn">This deletes the channel's database setup and source definitions. Finished media remains and can recreate the channel during scanning.</p><label><input id="delete-ack" type="checkbox"> I understand preserved media can make the scanner recreate this channel.</label><label>Type <strong id="delete-required"></strong><input id="delete-confirmation" autocomplete="off"></label><div class="actions"><button id="cancel-delete">Cancel</button><button id="confirm-delete" class="danger">Queue channel deletion</button></div></dialog>
 <section id="preview-panel" class="panel" hidden><h2>Catalog preview</h2><div class="actions"><label>From date<input id="preview-from" type="date"></label><label>Through date<input id="preview-through" type="date"></label><button id="select-ready">Select dated episodes in range</button><button id="clear-selection">Clear</button></div><div class="scroll"><table><thead><tr><th>Import</th><th>Date</th><th>Episode</th><th>Duration</th><th>Size</th><th>Status</th></tr></thead><tbody id="preview-rows"></tbody></table></div></section>
 <section class="panel"><h2>Chronological playlists</h2><div id="playlists"></div></section>
 <section class="panel"><h2>Sources and progress</h2><p id="cache"></p><div id="restore"></div><div id="sources"></div><div id="overview-message" class="message"></div></section>
@@ -3871,11 +4109,25 @@ async function refreshSource(id){try{await post(`/api/internet-media/sources/${i
 async function saveEpisode(id){try{await post(`/api/internet-media/episodes/${id}`,{selected:$(`selected-${id}`).checked,episode_date:$(`date-${id}`).value||null,manual_order:Number($(`order-${id}`).value)||0});await load()}catch(e){alert(e.message)}}async function excludeEpisode(id){try{await post(`/api/internet-media/episodes/${id}`,{selected:false,excluded:true});await load()}catch(e){alert(e.message)}}async function repairEpisode(id){try{await post(`/api/internet-media/episodes/${id}/repair`,{});await load()}catch(e){alert(e.message)}}async function catchup(id,action){try{await post(`/api/internet-media/episodes/${id}`,{catchup_action:action});await load()}catch(e){alert(e.message)}}async function startHere(channel,id){let value=prompt('Resume timestamp in seconds','0');if(value===null)return;try{await post('/api/internet-media/position',{channel,episode_id:id,position_seconds:Number(value)||0});await load()}catch(e){alert(e.message)}}async function retryJob(episodeId){try{await post('/api/internet-media/retry',{episode_id:episodeId});await load()}catch(e){alert(e.message)}}
 $('start-date').onclick=async()=>{try{const result=await post('/api/internet-media/position',{channel:$('position-channel').value,start_date:$('position-date').value,position_seconds:Number($('position-seconds').value)||0});$('position-message').textContent=`Position set to ${result.current?.display_title||'selected episode'}.`;await load()}catch(e){$('position-message').textContent=e.message;$('position-message').className='message bad'}};
 $('start-beginning').onclick=async()=>{try{const result=await post('/api/internet-media/position',{channel:$('position-channel').value,start_at_beginning:true,position_seconds:Number($('position-seconds').value)||0});$('position-message').textContent=`Position set to ${result.current?.display_title||'first episode'}.`;await load()}catch(e){$('position-message').textContent=e.message;$('position-message').className='message bad'}};
-$('preview-delete').onclick=async()=>{try{const slug=$('delete-channel').value;if(!slug)throw new Error('Choose a channel');deletePreview=await api(`/api/channels/${encodeURIComponent(slug)}/deletion-preview`);$('delete-name').textContent=deletePreview.display_name;$('delete-required').textContent=deletePreview.confirmation_text;$('delete-summary').textContent=`Records: ${deletePreview.records.assets} media, ${deletePreview.records.schedule_generations} schedules, ${deletePreview.records.internet_sources} sources, ${deletePreview.records.remote_episodes} remote episodes. ${deletePreview.source_files_to_delete} source files and ${deletePreview.unfinished_files_to_delete} unfinished files will be removed.`;$('delete-confirmation').value='';$('delete-ack').checked=false;$('delete-dialog').showModal()}catch(e){$('delete-message').textContent=e.message;$('delete-message').className='message bad'}};
+async function reviewChannelDeletion(slug){try{if(!slug)throw new Error('Choose a channel');deletePreview=await api(`/api/channels/${encodeURIComponent(slug)}/deletion-preview`);$('delete-name').textContent=deletePreview.display_name;$('delete-required').textContent=deletePreview.confirmation_text;$('delete-summary').textContent=`Records: ${deletePreview.records.assets} media, ${deletePreview.records.schedule_generations} schedules, ${deletePreview.records.internet_sources} sources, ${deletePreview.records.remote_episodes} remote episodes. ${deletePreview.source_files_to_delete} source files and ${deletePreview.unfinished_files_to_delete} unfinished files will be removed.`;$('delete-confirmation').value='';$('delete-ack').checked=false;$('delete-dialog').showModal()}catch(e){$('delete-message').textContent=e.message;$('delete-message').className='message bad'}};
+$('preview-delete').onclick=()=>reviewChannelDeletion($('delete-channel').value);
+const requestedDeletion=new URLSearchParams(window.location.search).get('delete');if(requestedDeletion)reviewChannelDeletion(requestedDeletion);
 $('cancel-delete').onclick=()=>$('delete-dialog').close();
-$('confirm-delete').onclick=async()=>{try{const result=await post(`/api/channels/${encodeURIComponent(deletePreview.slug)}/delete`,{confirmation_text:$('delete-confirmation').value,acknowledge_rescan:$('delete-ack').checked});$('delete-dialog').close();selectedDeleteChannel='';$('delete-message').textContent=result.scanner_will_recreate?'Channel deleted. Its media folder remains, so a future scan can recreate it.':'Channel deleted. Finished media was preserved.';await load()}catch(e){$('delete-message').textContent=e.message;$('delete-message').className='message bad'}};
+$('confirm-delete').onclick=async()=>{try{const result=await post(`/api/channels/${encodeURIComponent(deletePreview.slug)}/delete`,{confirmation_text:$('delete-confirmation').value,acknowledge_rescan:$('delete-ack').checked,channel_identity:deletePreview.channel_identity});$('delete-dialog').close();selectedDeleteChannel='';$('delete-message').textContent=result.queued?'Deletion queued. You can leave this page; progress appears in Channel folders and queued deletions.':result.scanner_will_recreate?'Channel deleted. Its media folder remains, so a future scan can recreate it.':'Channel deleted. Finished media was preserved.';if(window.refreshChannelAdministration)window.refreshChannelAdministration();await load()}catch(e){$('delete-message').textContent=e.message;$('delete-message').className='message bad'}};
 load();setInterval(load,5000);
 </script></main></body></html>"""
+
+
+INTERNET_MEDIA_HTML = INTERNET_MEDIA_HTML.replace('<main>', '<main>' + IPTV_HTML, 1).replace(
+    '</body>', '<script>' + IPTV_JS + '</script></body>', 1).replace(
+    'Remote collections and Watch at Your Pace channels',
+    'Live IPTV feeds, remote collections and Watch at Your Pace channels', 1)
+
+
+INDEX_HTML = INDEX_HTML.replace('<main>', '<main>' + CHANNEL_ADMIN_HTML, 1).replace(
+    '</body>', '<script>' + CHANNEL_ADMIN_JS + '</script></body>', 1)
+INTERNET_MEDIA_HTML = INTERNET_MEDIA_HTML.replace('<main>', '<main>' + CHANNEL_ADMIN_HTML, 1).replace(
+    '</body>', '<script>' + CHANNEL_ADMIN_JS + '</script></body>', 1)
 
 
 SETTINGS_HTML = """<!doctype html>
@@ -4023,7 +4275,7 @@ SETTINGS_HTML = """<!doctype html>
       } else if (field.type === "select") {
         input = `<select id="${id}" data-path="${field.path}" data-type="select">${field.options.map(value => {
           const label = field.path === "scheduling.midroll_fallback"
-            ? ({midpoint:"Quiet pause, then midpoint",none:"No fallback breaks"}[value] || value) : value;
+            ? ({midpoint:"Use fallback breaks",none:"No fallback breaks"}[value] || value) : value;
           return `<option value="${esc(value)}" ${value === field.value ? "selected" : ""}>${esc(label)}</option>`;
         }).join("")}</select>`;
       } else if (field.type === "channel") {
@@ -4035,7 +4287,7 @@ SETTINGS_HTML = """<!doctype html>
         const limits = field.type === "number" ? ` min="${field.min}" max="${field.max}" step="${field.step ?? 1}"` : "";
         input = `<input id="${id}" data-path="${field.path}" data-type="${field.type}" type="${type}" value="${esc(field.value)}"${limits}>`;
       }
-      return `<label class="field"><span>${esc(field.label)}${field.restart ? '<br><span class="restart">Restart required</span>' : ""}</span>${input}</label>`;
+      return `<label class="field"><span>${esc(field.label)}${field.restart ? '<br><span class="restart">Restart required</span>' : ""}</span>${input}${field.help ? `<small>${esc(field.help)}</small>` : ""}</label>`;
     }
     function renderFields() {
       const groups = new Map();
@@ -4958,9 +5210,17 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                 with closing(connect_database(database_path)) as connection:
                     self._json(ExternalMediaService(connection, config).overview())
                 return
-            if parsed.path == '/api/iptv':
-                with closing(connect_database(database_path)) as connection:
-                    self._json(IPTVService(connection,config).overview())
+            if parsed.path in {'/api/iptv', '/api/iptv/options', '/api/iptv/conflicts'}:
+                try:
+                    with closing(connect_database(database_path)) as connection:
+                        service = IPTVService(connection, config)
+                        cancel = runtime.stop_event if runtime is not None else None
+                        payload = (service.conflict_status(cancel_event=cancel) if parsed.path.endswith('/conflicts')
+                                   else service.overview(include_conflicts=not parsed.path.endswith('/options'), cancel_event=cancel))
+                except (ValueError, sqlite3.Error) as exc:
+                    self._json({'error': str(exc)}, 503)
+                    return
+                self._json(payload)
                 return
             if parsed.path == '/api/iptv/preview':
                 self._json(runtime.iptv_preview.snapshot() if runtime else {'state':'unavailable','detail':'Start the CRTV Sim application to preview on this PC'})
@@ -5003,13 +5263,24 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                             "media_root": str(media_root)})
                 return
             parts = parsed.path.strip("/").split("/")
+            if parsed.path == "/api/channels/deletions":
+                self._json(runtime.channel_deletions.snapshot() if runtime is not None else {"jobs": [], "error": None})
+                return
+            if parsed.path == "/api/channels/missing-folders":
+                try:
+                    with closing(connect_database(database_path)) as connection:
+                        result = ChannelFolderReview(connection, config).inventory()
+                    self._json(result)
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    self._json({"error": str(exc)}, 503)
+                return
             if (
                 len(parts) == 4
                 and parts[:2] == ["api", "channels"]
                 and parts[3] == "deletion-preview"
             ):
                 try:
-                    with connect_database(database_path) as connection:
+                    with closing(connect_database(database_path)) as connection:
                         payload = ChannelDeletionService(connection, config).preview(
                             unquote(parts[2])
                         )
@@ -5082,6 +5353,13 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                 )
                 response["pending_total"] = int(pending["total"])
                 self._json(response)
+                return
+            if parsed.path == "/api/library/action-counts":
+                from retrotv.library_actions import action_counts
+                with closing(connect_database(database_path)) as connection:
+                    connection.execute("BEGIN")
+                    payload = action_counts(connection, config)
+                self._json(payload)
                 return
             if parsed.path == "/api/runtime/status":
                 if runtime is None:
@@ -5308,6 +5586,7 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     return
                 status = params.get("status", [""])[0].strip().casefold()
                 settings = config.data.get("scheduling", {})
+                policy_key = BreakpointAnalyzer(None, config).policy_key
                 minimum_seconds = float(settings.get("midroll_min_media_minutes", 15)) * 60
                 where = ["a.media_type IN ('episode','movie')", "m.duration_seconds > ?"]
                 values: list[object] = [minimum_seconds]
@@ -5319,18 +5598,19 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                         return
                     where.append("a.id=?")
                 if status == "pending":
-                    where.append(f"""(b.asset_id IS NULL OR b.status IN ('pending','error') OR
+                    where.append(f"""(b.asset_id IS NULL OR b.status IN ('pending','error') OR b.refresh_error IS NOT NULL OR
                         b.source_signature != CAST(a.file_size AS TEXT) || ':' ||
-                        CAST(a.modified_ns AS TEXT) || ':breaks-v{BreakpointAnalyzer.ANALYSIS_VERSION}')""")
+                        CAST(a.modified_ns AS TEXT) || ':breaks-v{BreakpointAnalyzer.ANALYSIS_VERSION}:{policy_key}')""")
                 elif status in {"analyzed", "manual"}:
                     where.append("b.status=?")
                     values.append(status)
                 elif status == "midpoint":
                     where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method='midpoint')")
-                elif status == "quiet_pause":
-                    where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method='quiet_pause')")
+                elif status in {"quiet_pause", "still_card", "scene_fallback"}:
+                    where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method=?)")
+                    values.append(status)
                 elif status == "fallback":
-                    where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method IN ('midpoint','quiet_pause'))")
+                    where.append("EXISTS (SELECT 1 FROM asset_break_candidates c WHERE c.asset_id=a.id AND c.selected=1 AND c.method IN ('midpoint','quiet_pause','scene_fallback'))")
                 elif status:
                     self._json({"error": "Invalid breakpoint status"}, 400)
                     return
@@ -5341,7 +5621,7 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                                a.source_relative_path,m.duration_seconds,
                                a.file_size,a.modified_ns,b.source_signature,
                                b.status AS break_status,b.selected_offset_ms,
-                               b.selected_method,b.confidence,b.detail,b.analyzed_at,
+                               b.selected_method,b.confidence,b.detail,b.analyzed_at,b.refresh_error,
                                (SELECT GROUP_CONCAT(c.offset_ms, ',')
                                 FROM asset_break_candidates c
                                 WHERE c.asset_id=a.id AND c.selected=1)
@@ -5358,11 +5638,13 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     ).fetchall()
                 items = []
                 with connect_database(database_path) as connection:
+                    service = BreakpointAnalyzer(connection, config)
                     for row in rows:
                         item = dict(row)
                         item["needs_reanalysis"] = (
                             row["break_status"] in {None, "pending", "error"}
-                            or row["source_signature"] != BreakpointAnalyzer._signature(row)
+                            or bool(row["refresh_error"])
+                            or row["source_signature"] != service._signature(row)
                         )
                         evidence = connection.execute(
                             """SELECT offset_ms,method,score,signals_json
@@ -5380,13 +5662,15 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                             "SELECT target_index FROM asset_break_overrides WHERE asset_id=?",
                             (row["id"],),
                         )}
-                        targets = BreakpointAnalyzer(connection, config).target_offsets(
-                            round(float(row["duration_seconds"]) * 1000))
-                        item["targets"] = [{"index": index, "target_ms": target,
-                            "manual": index in overrides,
-                            "selected": next((entry for entry in item["selected_evidence"]
-                                if entry["signals"].get("window") == index), None)}
-                            for index, target in enumerate(targets, 1)]
+                        layout = service.recorded_layout(row['id'])
+                        item['normal_package_ms'] = layout['normal_package_ms']
+                        item['intended_count'] = layout['intended_count']
+                        item['manual_overflow'] = layout['manual_overflow']
+                        item['target_layout_identity'] = layout['identity']
+                        item['targets'] = [{**target, 'manual': target['index'] in overrides,
+                            'selected': next((entry for entry in item['selected_evidence']
+                                if entry['signals'].get('window') == target['index']), None)}
+                            for target in layout['targets']]
                         items.append(item)
                 self._json({"items": items})
                 return
@@ -5675,6 +5959,35 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+            folder_parts = parsed.path.strip("/").split("/")
+            if len(folder_parts) == 5 and folder_parts[:3] == ["api", "channels", "deletions"] and folder_parts[4] == "cancel":
+                try:
+                    if runtime is None:
+                        raise ValueError("Channel deletion queue is not running")
+                    self._json(runtime.cancel_channel_deletion(folder_parts[3]))
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, 409)
+                return
+            if len(folder_parts) == 4 and folder_parts[:2] == ["api", "channels"] and folder_parts[3] == "recreate-folders":
+                if runtime is not None and runtime.stop_event.is_set():
+                    self._json({"error": "CRTV Sim is shutting down"}, 409)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 4096:
+                        raise ValueError("Invalid folder review request")
+                    payload = json.loads(self.rfile.read(length))
+                    if not isinstance(payload, dict):
+                        raise ValueError("Request body must be an object")
+                    if runtime is not None:
+                        result = runtime.recreate_channel_folders(unquote(folder_parts[2]), payload.get("channel_identity"))
+                    else:
+                        with closing(connect_database(database_path)) as connection:
+                            result = ChannelFolderReview(connection, config).recreate(unquote(folder_parts[2]), payload.get("channel_identity"))
+                    self._json(result)
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    self._json({"error": str(exc)}, 400)
+                return
             workshop_parts = parsed.path.strip("/").split("/")
             if len(workshop_parts) == 4 and workshop_parts[:2] == ["api", "assets"] and workshop_parts[3] == "act-break-workshop":
                 try:
@@ -5700,6 +6013,10 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                         raise ValueError('Request must be an object')
                     if parsed.path == '/api/iptv/inspect':
                         result = inspect_url(payload.get('url',''))
+                    elif parsed.path == '/api/iptv/preview-test':
+                        if runtime is None:
+                            raise ValueError('Start the CRTV Sim application to open a test player')
+                        result = runtime.iptv_preview.start_selection(payload)
                     elif parsed.path == '/api/iptv/preview-stop':
                         result = runtime.iptv_preview.stop() if runtime else {'state':'idle'}
                     else:
@@ -5709,12 +6026,18 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                         with closing(connect_database(database_path)) as connection:
                             service = IPTVService(connection,config)
                             if feed_id is None:
-                                result = service.register(payload)
+                                tested = None
+                                if payload.get('test_id') or payload.get('new_channel'):
+                                    if runtime is None:
+                                        raise ValueError('Start CRTV Sim and test this feed before creating its channel')
+                                    tested = runtime.iptv_preview.validated_selection(payload.get('test_id'),payload)
+                                result = service.register(payload,tested_selection=tested)
                             elif action == 'test':
                                 service.playable_url(feed_id)
                                 if runtime is None:
                                     raise ValueError('Start the CRTV Sim application to open a test player')
-                                result = runtime.iptv_preview.start(feed_id)
+                                result = (runtime.iptv_preview.start(feed_id,presentation=payload['presentation'])
+                                          if 'presentation' in payload else runtime.iptv_preview.start(feed_id))
                             elif action == 'refresh':
                                 result = service.refresh(feed_id)
                             elif action == 'remove':
@@ -5872,6 +6195,9 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                 and parts[:2] == ["api", "channels"]
                 and parts[3] == "delete"
             ):
+                if runtime is not None and runtime.stop_event.is_set():
+                    self._json({"error": "CRTV Sim is shutting down. Restart it before deleting a channel."}, 409)
+                    return
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     if length > 64 * 1024:
@@ -5879,12 +6205,28 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     payload = json.loads(self.rfile.read(length) or b"{}")
                     if not isinstance(payload, dict):
                         raise ValueError("Request body must be an object")
-                    with connect_database(database_path) as connection:
+                    if runtime is not None:
+                        result = runtime.request_channel_deletion(unquote(parts[2]),
+                            confirmation_text=str(payload.get("confirmation_text") or ""),
+                            acknowledge_rescan=payload.get("acknowledge_rescan") is True,
+                            expected_identity=payload.get("channel_identity"))
+                        self._json(result, 202)
+                        return
+                    with closing(connect_database(database_path)) as connection:
                         result = ChannelDeletionService(connection, config).delete(
                             unquote(parts[2]),
                             confirmation_text=str(payload.get("confirmation_text") or ""),
                             acknowledge_rescan=payload.get("acknowledge_rescan") is True,
                         )
+                except sqlite3.OperationalError as exc:
+                    code = getattr(exc, 'sqlite_errorcode', 0) & 0xff
+                    busy = code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or 'locked' in str(exc).casefold()
+                    if busy:
+                        self._json({"error": "Channel deletion could not finish because the database is busy with another operation. Wait for background work to finish, then try again.",
+                                    "retryable": True}, 409)
+                    else:
+                        self._json({"error": str(exc)}, 400)
+                    return
                 except (
                     ValueError,
                     TypeError,
@@ -6073,6 +6415,56 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                     self._json({"error": str(exc)}, 400)
                     return
                 self._json({"ok": True})
+                return
+            if parsed.path in {"/api/duplicates/deletion-preview", "/api/duplicates/delete"}:
+                deleting = parsed.path.endswith('/delete')
+                try:
+                    length = int(self.headers.get('Content-Length', '0'))
+                    if not 0 <= length <= 16384:
+                        raise ValueError('Duplicate deletion request is too large')
+                    payload = json.loads(self.rfile.read(length) or b'{}')
+                    if not isinstance(payload, dict):
+                        raise ValueError('Expected a duplicate copy selection')
+                    asset_id = payload.get('asset_id')
+                    if isinstance(asset_id, bool) or not isinstance(asset_id, int) or asset_id <= 0:
+                        raise ValueError('Choose one valid asset ID')
+                    sha256 = payload.get('sha256')
+                    if not isinstance(sha256, str):
+                        raise ValueError('Invalid duplicate hash')
+                    with ExitStack() as stack:
+                        if deleting and runtime is not None:
+                            operation_lock = runtime.exclusive_operation_lock
+                            if not operation_lock.acquire(blocking=False):
+                                raise ValueError('CRTV Sim is maintaining media. Try again when it finishes.')
+                            stack.callback(operation_lock.release)
+                            stack.enter_context(runtime.lock)
+                            if runtime.stop_event.is_set():
+                                raise ValueError('CRTV Sim is shutting down')
+                            if runtime.tv_state not in {'stopped', 'error'}:
+                                raise ValueError('Stop TV before deleting a media file.')
+                            if not runtime._tv_is_idle():
+                                raise ValueError('Wait for TV playback to finish stopping before deleting media.')
+                            if runtime._exclusive_media_job_running():
+                                raise ValueError('CRTV Sim is maintaining media. Try again when it finishes.')
+                        connection = stack.enter_context(closing(connect_database(database_path)))
+                        # Do not wait a minute for a writer with the dialog open.
+                        connection.execute('PRAGMA busy_timeout=500')
+                        service = DuplicateService(connection, config)
+                        result = (service.delete_copy(asset_id, sha256, payload.get('token'))
+                                  if deleting else service.deletion_preview(asset_id, sha256))
+                except (ValueError, TypeError, OSError, sqlite3.Error) as exc:
+                    self._json({'error': str(exc)}, 400)
+                    return
+                if deleting and runtime is not None:
+                    try:
+                        runtime._refresh_pending_actions()
+                        result['maintenance_queued'] = runtime.request_maintenance()
+                    except (OSError, sqlite3.Error, RuntimeError) as exc:
+                        # The confirmed deletion already succeeded. Do not
+                        # encourage another destructive request on refresh failure.
+                        result['maintenance_queued'] = False
+                        result['refresh_warning'] = f'Could not request the follow-up refresh: {exc}'
+                self._json(result)
                 return
             duplicate_parts = parsed.path.strip("/").split("/")
             if len(duplicate_parts) == 3 and duplicate_parts[:2] == ["api", "duplicates"]:
@@ -6294,6 +6686,9 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                         raise ValueError("AI graphic request is too large")
                     payload = json.loads(self.rfile.read(length) or b"{}")
                     action = str(payload.get("action", "")).strip().casefold()
+                    include_station_name = payload.get("include_station_name", True)
+                    if not isinstance(include_station_name, bool):
+                        raise ValueError("Include station name must be true or false")
                     drafts = self._ai_graphic_draft_root()
                     if action in {"install", "variation"}:
                         if action == "variation":
@@ -6349,6 +6744,7 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                                 "method": "composition-blueprint",
                                 "template_set": "composition-blueprint",
                                 "channel_name": channel_name,
+                                "include_station_name": include_station_name,
                                 "art_direction": art_note,
                                 "purpose": purpose,
                                 "quality": "low",
@@ -6429,8 +6825,14 @@ def make_handler(config: AppConfig, runtime=None) -> type[BaseHTTPRequestHandler
                             "CRTV Sim will add program information over the lower third, so keep that area clean "
                             "and high contrast. Keep the main visual interest outside that lower-third safe area."
                         )
+                        if not include_station_name:
+                            guide = (
+                                "Create unbranded background artwork without any station name, logo, wordmark, "
+                                "letters, or readable text. Do not leave an empty logo badge or placeholder. "
+                                "Keep the lower third clean and high contrast for the application's programme text."
+                            )
                         scope = ", ".join(value for value in [
-                            channel_name, weekly and f"weekly special {weekly}",
+                            channel_name if include_station_name else None, weekly and f"weekly special {weekly}",
                             holiday and f"{holiday} seasonal version", daypart and f"{daypart} daypart",
                             "up next" if purpose == "up-next" else "station interstitial",
                         ] if value)

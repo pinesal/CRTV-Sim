@@ -13,6 +13,10 @@ from retrotv.internet_media import PreparationService
 ACTIVE_PREPARATION_STATES = ("downloading", "validating", "analyzing", "normalizing")
 
 
+class ChannelPreparationStopping(RuntimeError):
+    pass
+
+
 class ChannelDeletionService:
     """Remove a channel's database state while leaving finished media in place."""
 
@@ -22,7 +26,7 @@ class ChannelDeletionService:
 
     def _channel(self, channel_slug: str):
         row = self.connection.execute(
-            "SELECT id,slug,display_name,channel_number FROM channels WHERE slug=?",
+            "SELECT id,slug,display_name,channel_number,management_identity FROM channels WHERE slug=?",
             (slugify(channel_slug),),
         ).fetchone()
         if row is None:
@@ -90,6 +94,8 @@ class ChannelDeletionService:
             self.config.storage_root("media"), str(channel["slug"])
         )
         return {
+            "channel_id": channel_id,
+            "channel_identity": str(channel["management_identity"]),
             "slug": str(channel["slug"]),
             "display_name": str(channel["display_name"]),
             "confirmation_text": f"DELETE {channel['display_name']}",
@@ -107,8 +113,18 @@ class ChannelDeletionService:
             "scanner_will_recreate": channel_root.is_dir(),
         }
 
-    def _request_cancellation(self, channel_id: int) -> None:
+    def _request_cancellation(self, channel_id: int, expected_identity: str | None = None) -> None:
+        with self.connection:
+            self._write_cancellation(channel_id, expected_identity)
+
+    def _write_cancellation(self, channel_id: int, expected_identity: str | None = None) -> None:
         now = utc_now()
+        self.connection.execute("BEGIN IMMEDIATE")
+        if expected_identity is not None:
+            current = self.connection.execute("SELECT management_identity FROM channels WHERE id=?", (channel_id,)).fetchone()
+            if current is None or current[0] != expected_identity:
+                self.connection.rollback()
+                raise ValueError("The channel was replaced; review deletion again")
         self.connection.execute(
             "UPDATE internet_sources SET enabled=0 WHERE channel_id=?", (channel_id,)
         )
@@ -146,7 +162,7 @@ class ChannelDeletionService:
             if not count:
                 return
             if time.monotonic() >= deadline:
-                raise RuntimeError(
+                raise ChannelPreparationStopping(
                     "A download or conversion is still stopping. Wait a moment and delete the channel again."
                 )
             time.sleep(0.1)
@@ -173,8 +189,11 @@ class ChannelDeletionService:
         confirmation_text: str,
         acknowledge_rescan: bool,
         timeout_seconds: float = 45.0,
+        expected_identity: str | None = None,
     ) -> dict[str, object]:
         channel = self._channel(channel_slug)
+        if expected_identity is not None and channel["management_identity"] != expected_identity:
+            raise ValueError("The channel was replaced after deletion was requested. Review it again.")
         required = f"DELETE {channel['display_name']}"
         if confirmation_text != required:
             raise ValueError(f"Type {required!r} exactly to delete this channel")
@@ -185,7 +204,7 @@ class ChannelDeletionService:
 
         channel_id = int(channel["id"])
         source_paths = self._source_paths(channel_id)
-        self._request_cancellation(channel_id)
+        self._request_cancellation(channel_id, expected_identity)
         # Remove the source definitions immediately so a restart cannot
         # re-enable preparation while an active worker is winding down.
         for path in source_paths:
@@ -202,6 +221,11 @@ class ChannelDeletionService:
             )
         ]
         with transaction(self.connection):
+            self.connection.execute("UPDATE channels SET id=id WHERE 0")
+            if expected_identity is not None:
+                current = self.connection.execute("SELECT management_identity FROM channels WHERE id=?", (channel_id,)).fetchone()
+                if current is None or current[0] != expected_identity:
+                    raise ValueError("The channel was replaced; review deletion again")
             self.connection.execute(
                 "DELETE FROM schedule_entries WHERE channel_id=?", (channel_id,)
             )

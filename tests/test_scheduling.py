@@ -1024,7 +1024,7 @@ class SchedulingTests(unittest.TestCase):
         block = [row for row in rows if row["programming_block_id"] == block_id]
         self.assertEqual([row["asset_id"] for row in block[:6]], [2, 1, 2, 4, 3, 1])
 
-    def test_hour_slot_episode_is_sliced_around_two_midrolls(self):
+    def test_hour_slot_episode_is_sliced_around_three_midrolls(self):
         self.add_asset(
             1, media_type="episode", daypart="all-day",
             duration=2640, series="Hour Series",
@@ -1047,7 +1047,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(len(programs), 4)
         self.assertEqual(
             [(row["media_start_ms"], row["media_end_ms"]) for row in programs],
-            [(0, 660000), (660000, 1500000), (1500000, 2070000), (2070000, 2640000)],
+            [(0, 750000), (750000, 1500000), (1500000, 2070000), (2070000, 2640000)],
         )
         self.assertEqual(
             len([

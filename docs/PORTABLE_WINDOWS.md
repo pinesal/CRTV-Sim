@@ -14,8 +14,12 @@ From the project root, the public release command is:
 It selects packages in `packaging/windows-media.lock.json`, verifies binary
 and source hashes, matches source recipes to binary build records, freezes the
 application with isolated DLL search paths, prepares notices/manifests, creates
-paired Windows/source ZIPs and SHA256SUMS, then runs media and extracted-app
-smoke checks. Output defaults to `dist/release-candidate/`. No upload occurs.
+the Windows ZIP and SHA256SUMS, then runs media and extracted-app smoke checks.
+Unchanged compiled files and published sources/media can be reused by hash;
+only current build materials are repackaged when dependency sources still match.
+Changed dependencies use the full source-packaging gate. No upload occurs.
+See [Release workflow](RELEASE_WORKFLOW.md) for the reuse registry, publication
+plan and separate upload command.
 
 Public builds require the recovered sources and notices in the lock and a
 licensed Visual Studio Community 2026/Professional/Enterprise installation
@@ -27,7 +31,7 @@ For isolated internal investigation/testing:
 
 ```powershell
 .\scripts\build-portable-windows.ps1 -InternalBuild `
-  -Output 'dist\internal-candidate\CRTV-Sim-Portable-0.9.55'
+  -Output 'dist\internal-candidate\CRTV-Sim-Portable-0.9.56'
 ```
 
 This still verifies pinned packages and produces available source evidence, but
