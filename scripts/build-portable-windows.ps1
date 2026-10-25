@@ -1,6 +1,6 @@
 param(
     [string]$Python = '.venv\Scripts\python.exe',
-    [string]$Output = 'dist\release-candidate-0.9.56\CRTV-Sim-Portable-0.9.56',
+    [string]$Output = 'dist\release-candidate-0.9.57\CRTV-Sim-Portable-0.9.57',
     [string]$MediaRoot = '../Videos/media',
     [switch]$SkipArchive,
     [switch]$InternalBuild,

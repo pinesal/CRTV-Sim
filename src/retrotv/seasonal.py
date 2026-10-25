@@ -28,6 +28,28 @@ DEFAULT_WEIGHTS = {
 }
 
 
+def weekly_schedule_mode(connection, raw):
+    """Resolve a special's own choice, or freeze its legacy channel default."""
+    mode = raw.get('schedule_mode')
+    if mode is None and connection is not None:
+        row = connection.execute(
+            "SELECT settings_json FROM calendar_rules WHERE slug=? AND channel_slug=? AND rule_type='weekly'",
+            (slugify(str(raw['slug'])), slugify(str(raw['channel']))),
+        ).fetchone()
+        if row:
+            mode = json.loads(row['settings_json'] or '{}').get('schedule_mode')
+        if mode is None:
+            row = connection.execute(
+                """SELECT p.recurring_enabled FROM channel_schedule_preferences p
+                   JOIN channels c ON c.id=p.channel_id WHERE c.slug=?""", (slugify(str(raw['channel'])),),
+            ).fetchone()
+            mode = 'recurring' if row and row[0] else 'random'
+    mode = mode if mode is not None else 'random'
+    if mode not in {'recurring', 'random'}:
+        raise ValueError('Weekly schedule mode must be recurring or random')
+    return mode
+
+
 def _parse_clock(value: str) -> time:
     try:
         hour, minute = (int(part) for part in value.split(":", 1))
@@ -82,6 +104,7 @@ class ProgrammingWindow:
     guide_label: str
     mode: str = "replace"
     enabled: bool = True
+    schedule_mode: str = 'random'
 
     def interval_for_start_date(self, value: date, timezone) -> tuple[datetime, datetime]:
         starts_at = datetime.combine(value, self.start, timezone)
@@ -203,8 +226,7 @@ class SeasonalRuleEngine:
             )
         return tuple(rules)
 
-    @staticmethod
-    def _load_windows(raw_rules: Iterable[dict[str, Any]]) -> tuple[ProgrammingWindow, ...]:
+    def _load_windows(self, raw_rules: Iterable[dict[str, Any]]) -> tuple[ProgrammingWindow, ...]:
         rules = []
         for raw in raw_rules:
             slug = slugify(str(raw["slug"]))
@@ -226,6 +248,7 @@ class SeasonalRuleEngine:
                     guide_label=str(raw.get("guide_label", humanize(slug).title())),
                     mode=str(raw.get("mode", "replace")),
                     enabled=bool(raw.get("enabled", True)),
+                    schedule_mode=weekly_schedule_mode(self.connection, raw),
                 )
             )
         return tuple(rules)
@@ -398,7 +421,7 @@ class SeasonalRuleEngine:
                 window.start.isoformat(timespec="minutes"),
                 window.end.isoformat(timespec="minutes"),
                 window.guide_label,
-                {},
+                {'schedule_mode': window.schedule_mode},
                 window.enabled,
                 now,
             )

@@ -253,7 +253,21 @@ class DatabaseHousekeepingService:
                GROUP BY se.channel_id,se.asset_id""",
             (cutoff,),
         ).fetchall()
-        for kind, rows in (("series", series), ("block", blocks)):
+        # Legacy unscoped checkpoints remain readable by older clients. New
+        # base-only checkpoints must not inherit a weekly shadow's last episode.
+        base_series = self.connection.execute(
+            """SELECT se.channel_id,'base:' || COALESCE(json_extract(se.explanation_json,'$.selection.series'),
+                      a.series_title,a.display_title,a.original_filename) AS context_key,
+                      se.asset_id,MAX(se.ends_at) AS last_used_at
+               FROM schedule_entries se JOIN schedule_generations sg ON sg.id=se.generation_id
+               JOIN assets a ON a.id=se.asset_id
+               WHERE sg.schedule_date<? AND sg.status='active' AND se.is_program=1
+                 AND COALESCE(se.programming_owner,'base')='base'
+                 AND COALESCE(CASE WHEN json_type(se.explanation_json,'$.selection.collection_type') IS NOT NULL
+                     THEN json_extract(se.explanation_json,'$.selection.collection_type') ELSE a.collection_type END,'')=''
+               GROUP BY se.channel_id,context_key""", (cutoff,),
+        ).fetchall()
+        for kind, rows in (("series", series), ("series", base_series), ("block", blocks)):
             for row in rows:
                 self.connection.execute(
                     """INSERT INTO schedule_history_checkpoints(

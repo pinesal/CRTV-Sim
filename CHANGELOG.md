@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.9.57 — 2026-10-25
+
+- Fix weekly specials restarting a series on recurring channels. Keep episode
+  progress separate for each special, including shadow placements that share
+  source videos, and seed existing specials from prior active schedules.
+- Add independent Recurring lineup / Random shows choices in Settings → Weekly
+  programming blocks. Both advance episodes sequentially; initialize existing
+  choices from the channel, retain progress across mode changes and housekeeping,
+  and preserve locked schedules during ordinary readiness updates.
+
 ## 0.9.56 — 2026-10-23
 
 - Add individual video preview links and confirmed Delete copy actions to

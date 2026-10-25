@@ -31,7 +31,7 @@ For isolated internal investigation/testing:
 
 ```powershell
 .\scripts\build-portable-windows.ps1 -InternalBuild `
-  -Output 'dist\internal-candidate\CRTV-Sim-Portable-0.9.56'
+  -Output 'dist\internal-candidate\CRTV-Sim-Portable-0.9.57'
 ```
 
 This still verifies pinned packages and produces available source evidence, but

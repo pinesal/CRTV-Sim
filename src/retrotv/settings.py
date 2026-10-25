@@ -272,6 +272,19 @@ class SettingsService:
     def snapshot(self, channels: list[dict[str, Any]]) -> dict[str, Any]:
         effective = copy.deepcopy(self.config.data)
         _merge_in_place(effective, read_settings_overrides(self.path))
+        windows = copy.deepcopy(effective.get('seasonal', {}).get('windows', {}))
+        if isinstance(windows, list):
+            windows = {item['slug']: {key: value for key, value in item.items() if key != 'slug'}
+                       for item in windows}
+        from retrotv.seasonal import weekly_schedule_mode
+        with closing(sqlite3.connect(self.config.database_path.as_uri() + '?mode=ro', uri=True)
+                     if self.config.database_path.is_file() else sqlite3.connect(':memory:')) as connection:
+            connection.row_factory = sqlite3.Row
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for slug, window in windows.items():
+                window['schedule_mode'] = weekly_schedule_mode(
+                    connection if {'calendar_rules', 'channel_schedule_preferences'} <= tables else None,
+                    {'slug': slug, **window})
         startup_destinations = copy.deepcopy(channels)
         startup_destinations.append(
             {
@@ -298,7 +311,7 @@ class SettingsService:
             "breeze_key_configured": bool(configured_breeze_api_key()),
             "openai_key_configured": bool(configured_openai_api_key()),
             "filename_clues": clue_settings(AppConfig(self.config.profile_path, self.config.project_root, effective)),
-            "windows": copy.deepcopy(effective.get("seasonal", {}).get("windows", {})),
+            "windows": windows,
         }
 
     def save(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -822,6 +835,10 @@ class SettingsService:
                 "priority": int(item.get("priority", 300)),
                 "enabled": bool(item.get("enabled", False)),
             }
+            if 'schedule_mode' in item:
+                if item['schedule_mode'] not in {'recurring', 'random'}:
+                    raise ValueError(f'Invalid weekly schedule mode for {key}')
+                result[key]['schedule_mode'] = item['schedule_mode']
         return result
 
     @staticmethod

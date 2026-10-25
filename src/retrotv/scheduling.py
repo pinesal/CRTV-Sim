@@ -21,6 +21,7 @@ from retrotv.bumper_cues import effective_bumper_cue, series_matches, configured
 from retrotv.graphics import GraphicsService
 from retrotv.recurring_scopes import ScopePlacement, allocate_recurring_scopes
 from retrotv.seasonal import RuleContext, SeasonalRuleEngine
+from retrotv.weekly_lineups import WeeklyLineups, seed_weekly
 
 
 PLACEMENT_CTE = """
@@ -712,6 +713,9 @@ class ScheduleBuilder:
             "version": self.schedule_version,
             "promo_pool_revision": 2,
             "shared_holiday_episode_revision": 1,
+            "weekly_lineup_revision": 1,
+            "weekly_modes": [(window.slug, window.schedule_mode) for window in self.rules.windows
+                             if window.channel_slug == channel_slug],
             "dayparts": [
                 {
                     "slug": item.slug,
@@ -956,11 +960,12 @@ class ScheduleBuilder:
         return result
 
     def _previous_programs(
-        self, channel_id: int, before: datetime
+        self, channel_id: int, before: datetime, *, base_only: bool = False
     ) -> dict[str, int]:
         rows = self.connection.execute(
             """
-            SELECT COALESCE(a.series_title, a.display_title, a.original_filename)
+            SELECT COALESCE(json_extract(se.explanation_json,'$.selection.series'),
+                           a.series_title, a.display_title, a.original_filename)
                        AS series_key,
                    se.asset_id
             FROM schedule_entries se
@@ -970,9 +975,12 @@ class ScheduleBuilder:
               AND se.is_program = 1
               AND sg.status IN ('active', 'superseded')
               AND se.ends_at <= ?
+              AND (?=0 OR (COALESCE(se.programming_owner,'base')='base'
+                   AND COALESCE(CASE WHEN json_type(se.explanation_json,'$.selection.collection_type') IS NOT NULL
+                       THEN json_extract(se.explanation_json,'$.selection.collection_type') ELSE a.collection_type END,'')=''))
             ORDER BY se.ends_at DESC, sg.id DESC
             """,
-            (channel_id, _iso(before)),
+            (channel_id, _iso(before), int(base_only)),
         ).fetchall()
         result: dict[str, int] = {}
         for row in rows:
@@ -984,8 +992,15 @@ class ScheduleBuilder:
                ORDER BY last_used_at DESC""",
             (channel_id, _iso(before)),
         ).fetchall()
+        channel = self.connection.execute('SELECT slug FROM channels WHERE id=?', (channel_id,)).fetchone()
+        has_weekly = bool(base_only and channel and any(window.channel_slug == channel[0] for window in self.rules.windows))
         for row in checkpoints:
-            result.setdefault(str(row["context_key"]), int(row["asset_id"]))
+            key = str(row['context_key'])
+            if key.startswith('base:'):
+                if base_only:
+                    result.setdefault(key[5:], int(row['asset_id']))
+            elif not base_only or not has_weekly:
+                result.setdefault(key, int(row['asset_id']))
         return result
 
     def schedule_preferences(self, channel_slug: str) -> dict[str, bool | str]:
@@ -1038,6 +1053,7 @@ class ScheduleBuilder:
             presentation = str(presentation_format).strip().casefold()
         if presentation not in {"standard", "content_only"}:
             raise ValueError("Presentation format must be standard or content_only")
+        self.rules.sync_catalog()
         self.connection.execute(
             """
             INSERT INTO channel_schedule_preferences(
@@ -1307,21 +1323,28 @@ class ScheduleBuilder:
             try:
                 state = json.loads(str(snapshot["state_json"]))
                 if isinstance(state, dict) and int(state.get("version", 0)) in {1, 2}:
+                    if state.get('regular_recurring') is False and self.schedule_preferences(channel_slug)['recurring_enabled']:
+                        # A random parent now also has snapshots for its specials.
+                        # Enabling regular recurrence must seed regular progress
+                        # from actual base schedules, not that snapshot's old seed.
+                        state = {**state, 'slots': {}, 'queues': {}, 'borrowed_weekend_slots': {}, 'progress': {}}
+                        self._seed_base_progress(state, channel_id, channel_slug, schedule_date)
                     if scoped and int(state["version"]) == 1:
                         # Retain projected episode progress, but start the new
                         # cross-daypart lineup without inherited duplicate slots.
                         state = {
-                            "version": 2, "slots": {}, "borrowed_weekend_slots": {},
+                            **state, "version": 2, "slots": {}, "borrowed_weekend_slots": {},
                             "queues": {}, "progress": state.get("progress", {}),
                             "holiday_lineups": state.get("holiday_lineups", {}),
                         }
                     elif not scoped and int(state["version"]) == 2:
                         state = {
-                            "version": 1, "slots": {}, "borrowed_weekend_slots": {},
+                            **state, "version": 1, "slots": {}, "borrowed_weekend_slots": {},
                             "queues": {}, "progress": state.get("progress", {}),
                             "holiday_lineups": state.get("holiday_lineups", {}),
                         }
                     self._normalize_recurring_state_templates(state, unique_weekends)
+                    seed_weekly(self, state, channel_id, channel_slug, schedule_date)
                     return state, self._recurring_state_hash(state)
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
@@ -1347,10 +1370,17 @@ class ScheduleBuilder:
                         str(slot)
                     ] = series
 
+        self._seed_base_progress(state, channel_id, channel_slug, schedule_date)
+        self._normalize_recurring_state_templates(state, unique_weekends)
+        seed_weekly(self, state, channel_id, channel_slug, schedule_date)
+        return state, self._recurring_state_hash(state)
+
+    def _seed_base_progress(self, state, channel_id, channel_slug, schedule_date):
         eligible = self._eligible_base_series_asset_order(channel_slug)
         previous = self._previous_programs(
             channel_id,
             datetime.combine(schedule_date, time.min, self.timezone),
+            base_only=True,
         )
         progress = state["progress"]
         assert isinstance(progress, dict)
@@ -1364,8 +1394,6 @@ class ScheduleBuilder:
                 "last_asset_id": asset_id,
                 "seen_asset_ids": ids[: ids.index(asset_id) + 1],
             }
-        self._normalize_recurring_state_templates(state, unique_weekends)
-        return state, self._recurring_state_hash(state)
 
     def _recurring_queue(self, state: dict[str, object], daypart: str) -> list[dict[str, object]]:
         queues = state.setdefault("queues", {})
@@ -3506,6 +3534,7 @@ class ScheduleBuilder:
         channel_slug: str,
         schedule_date: date,
         rng: random.Random,
+        weekly_lineups=None,
     ) -> list[TimelineItem]:
         """Build a channel-wide, real-duration sequence with no interruptions.
 
@@ -3520,7 +3549,7 @@ class ScheduleBuilder:
         day_end = datetime.combine(
             schedule_date + timedelta(days=1), time.min, self.timezone
         )
-        previous = self._previous_programs(channel_id, day_start)
+        previous = self._previous_programs(channel_id, day_start, base_only=True)
         state: dict[
             str,
             tuple[dict[str, list[Candidate]], dict[str, int], list[str], int],
@@ -3563,32 +3592,38 @@ class ScheduleBuilder:
                 + ",".join(item.slug for item in context.holidays)
             )
             if state_key not in state:
-                groups, pointers = self._series_state(programs, previous)
+                prior = (weekly_lineups.previous(context.owner, programs)
+                         if weekly_lineups is not None and context.owner else previous)
+                groups, pointers = self._series_state(programs, prior)
                 state[state_key] = (groups, pointers, self._series_rotation(groups, rng), 0)
             groups, pointers, rotation, rotation_index = state[state_key]
 
             while cursor < segment.ends_at:
                 remaining_ms = round((day_end - cursor).total_seconds() * 1000)
+                selection_used = (weekly_lineups.used_for(context.owner)
+                                  if weekly_lineups is not None and context.owner else used_programs)
                 program, next_rotation = self._select_program(
                     groups,
                     pointers,
                     rotation,
                     rotation_index,
                     remaining_ms,
-                    used_programs,
+                    selection_used,
+                    weekly_lineups.preferred(context.owner, cursor, groups)
+                    if weekly_lineups is not None and context.owner else None,
                 )
                 if program is None:
                     # Once every available file has played, start a new pass.
                     # Pointer state keeps the restart from favoring the same
                     # file repeatedly when alternatives exist.
-                    used_programs.clear()
+                    selection_used.clear()
                     program, next_rotation = self._select_program(
                         groups,
                         pointers,
                         rotation,
                         rotation_index,
                         remaining_ms,
-                        used_programs,
+                        selection_used,
                     )
                 media_end_ms: int | None = None
                 if program is None:
@@ -3623,7 +3658,11 @@ class ScheduleBuilder:
                     programming_block_id=programming_block_number,
                     media_end_ms=media_end_ms,
                 )
-                used_programs.add(program.asset_id)
+                if weekly_lineups is None or context.owner is None:
+                    used_programs.add(program.asset_id)
+                if weekly_lineups is not None and context.owner and program.media_type != 'complete_block':
+                    weekly_lineups.note(context.owner, items[-1].starts_at, program.asset_id,
+                                        program.series, program.collection_type, program.collection_slug)
                 last_program_id = program.asset_id
             carried_cursor = cursor
         return items
@@ -3639,15 +3678,17 @@ class ScheduleBuilder:
         recurring_state: dict[str, object] | None = None,
         recurring_eligible_assets: dict[str, set[int]] | None = None,
         scoped_allocation: dict[str, object] | None = None,
+        weekly_lineups=None,
     ) -> list[TimelineItem]:
         if self.schedule_preferences(channel_slug)["presentation_format"] == "content_only":
             return self._build_content_only_timeline(
-                channel_id, channel_slug, schedule_date, rng
+                channel_id, channel_slug, schedule_date, rng, weekly_lineups
             )
         items: list[TimelineItem] = []
         previous = self._previous_programs(
             channel_id,
             datetime.combine(schedule_date, time.min, self.timezone),
+            base_only=True,
         )
         if recurring_state is not None:
             # Base and seasonal placements may share a name or shadow target.
@@ -3798,7 +3839,9 @@ class ScheduleBuilder:
                 + ",".join(item.slug for item in context.holidays)
             )
             if state_key not in state:
-                groups, pointers = self._series_state(programs, previous)
+                prior = (weekly_lineups.previous(context.owner, programs)
+                         if weekly_lineups is not None and context.owner else previous)
+                groups, pointers = self._series_state(programs, prior)
                 rotation = self._series_rotation(groups, rng)
                 state[state_key] = (groups, pointers, rotation, 0)
             groups, pointers, rotation, rotation_index = state[state_key]
@@ -3883,6 +3926,8 @@ class ScheduleBuilder:
                 selection_groups = groups
                 selection_rotation = rotation
                 selection_used = set(used_programs)
+                if weekly_lineups is not None and context.owner:
+                    selection_used = set(weekly_lineups.used_for(context.owner))
                 if reuse_recurring_template or scoped_plan is not None:
                     queue_managed = (
                         recurring_state is not None
@@ -3974,6 +4019,8 @@ class ScheduleBuilder:
                             )
                 if promoted_series is not None:
                     preferred_series = promoted_series
+                if weekly_lineups is not None and context.owner and reuse_recurring_template:
+                    preferred_series = weekly_lineups.preferred(context.owner, cursor, selection_groups)
                 program, holiday_overlay, selection_budget = (
                     self._select_holiday_recurring_program(
                         holiday_overlays, segment.slug, cursor, remaining_ms,
@@ -4168,6 +4215,10 @@ class ScheduleBuilder:
 
                 last_group: int | None = None
                 for index, selected_program in enumerate(package_programs):
+                    if weekly_lineups is not None and context.owner:
+                        weekly_lineups.note(context.owner, cursor, selected_program.asset_id,
+                                            selected_program.series, selected_program.collection_type,
+                                            selected_program.collection_slug)
                     group_number += 1
                     last_group = group_number
                     if index == 0 and opening_bumper is not None:
@@ -4235,7 +4286,7 @@ class ScheduleBuilder:
                         )
                         last_used[interstitial.asset_id] = cursor
                     last_used[selected_program.asset_id] = cursor
-                    if holiday_overlay is None:
+                    if holiday_overlay is None and (weekly_lineups is None or context.owner is None):
                         used_programs.add(selected_program.asset_id)
 
                 if reserve_tail:
@@ -4673,6 +4724,11 @@ class ScheduleBuilder:
         recurring_state: dict[str, object] | None = None
         recurring_input_hash = ""
         recurring_eligible_assets: dict[str, set[int]] = {}
+        projection_state = None
+        has_weekly = any(window.channel_slug == channel_slug for window in self.rules.windows)
+        if has_weekly and not (preferences['recurring_enabled'] and preferences['presentation_format'] != 'content_only'):
+            projection_state, recurring_input_hash = self._recurring_state_before(
+                channel_id, channel_slug, schedule_date, unique_weekends=bool(preferences['unique_weekends']))
         if preferences["recurring_enabled"] and preferences["presentation_format"] != "content_only":
             recurring_state, recurring_input_hash = self._recurring_state_before(
                 channel_id,
@@ -4695,6 +4751,12 @@ class ScheduleBuilder:
                     for key in list(borrowed):
                         if str(key).startswith(f"{template}:"):
                             borrowed.pop(key, None)
+        if recurring_state is not None:
+            projection_state = recurring_state
+        if projection_state is not None:
+            projection_state['regular_recurring'] = recurring_state is not None
+        weekly_before = json.loads(json.dumps(projection_state.get('weekly_lineups', {}))) if projection_state else {}
+        weekly_lineups = WeeklyLineups(self, json.loads(json.dumps(weekly_before))) if has_weekly else None
         seed = self._seed(channel_slug, schedule_date, reroll_token)
         rng = random.Random(seed)
         scoped_allocation: dict[str, object] = {}
@@ -4709,11 +4771,16 @@ class ScheduleBuilder:
             recurring_state=recurring_state,
             recurring_eligible_assets=recurring_eligible_assets,
             scoped_allocation=scoped_allocation,
+            weekly_lineups=weekly_lineups,
         )
         timeline = self._insert_weekly_special_promos(
             channel_slug, schedule_date, timeline
         )
         timeline = self._finish_iptv(channel_slug, timeline)
+        if weekly_lineups is not None:
+            weekly_lineups.state = weekly_before
+            weekly_lineups.record(timeline)
+            projection_state['weekly_lineups'] = weekly_lineups.state
         if recurring_state is not None:
             if live_progress is not None:
                 aired = set()
@@ -4874,8 +4941,8 @@ class ScheduleBuilder:
                     """,
                     (now, generation_id),
                 )
-                if recurring_state is not None:
-                    serialized_state = json.dumps(recurring_state, sort_keys=True)
+                if projection_state is not None:
+                    serialized_state = json.dumps(projection_state, sort_keys=True)
                     self.connection.execute(
                         """INSERT INTO recurring_lineup_snapshots(
                                generation_id,channel_id,schedule_date,state_json,
@@ -4886,7 +4953,7 @@ class ScheduleBuilder:
                             channel_id,
                             schedule_date.isoformat(),
                             serialized_state,
-                            self._recurring_state_hash(recurring_state),
+                            self._recurring_state_hash(projection_state),
                             recurring_input_hash,
                             now,
                         ),
@@ -5298,7 +5365,8 @@ class ScheduleBuilder:
         if active["configuration_fingerprint"] != self._configuration_fingerprint(channel_slug):
             return False
         preferences = self.schedule_preferences(channel_slug)
-        if not preferences["recurring_enabled"] or preferences["presentation_format"] == "content_only":
+        if (not preferences["recurring_enabled"] or preferences["presentation_format"] == "content_only") and not any(
+                window.channel_slug == channel_slug for window in self.rules.windows):
             return True
         channel_id = self.ensure_channel(channel_slug)
         _state, expected_input_hash = self._recurring_state_before(

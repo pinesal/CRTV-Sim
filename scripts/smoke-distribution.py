@@ -14,7 +14,7 @@ import zipfile
 from urllib.request import Request, urlopen
 
 PROJECT = Path(__file__).resolve().parents[1]
-BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.56'
+BUILD = PROJECT / 'dist/CRTV-Sim-Portable-0.9.57'
 ROOT = PROJECT / '.test-tmp/Frozen distributión with spaces final'
 
 

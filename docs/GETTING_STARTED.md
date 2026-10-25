@@ -331,6 +331,24 @@ keeps its regular show times, enable **Recurring schedule** for that channel in
 **Library & Schedules**. Otherwise, the scheduler can create a different lineup
 when schedules are refreshed. Fixed weekly specials keep their reserved times.
 
+Each special also has its own **Schedule** choice under **Settings → Weekly
+programming blocks**. **Recurring lineup** keeps established show slots within
+the special; **Random shows** varies show placement. Both advance episodes in
+order, whether you watch them or not. Each special's episode progress is separate
+from the regular channel and other specials, including when shadows reuse the
+same videos. A completed series can begin another pass through its episodes.
+
+Existing specials initially retain their channel's current mode. Changing the
+parent channel later does not change an initialized special's choice. Switching
+a special's mode preserves episode progress; switching to Recurring uses its
+most recent lineup where compatible media remains available. Use **Save & update
+schedules** to apply changes to eligible unlocked schedules.
+
+On upgrade, retained schedule history seeds the last episode and established
+slots for each special. Rebuilds do not consume another episode. Saved progress
+survives restarts and normal history cleanup; locked and historical schedules
+remain protected by the existing schedule-update rules.
+
 Use **Live Guide** to see what is scheduled. It includes the CRTV Sim Guide
 channel, which presents the schedule for the other channels.
 
